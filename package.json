@@ -1,5 +1,5 @@
 {
-    "name": "monad-cookie-clicker",
+    "name": "monad-cookie-clicker-thirdweb",
     "private": true,
     "version": "0.1.0",
     "type": "module",
@@ -10,6 +10,9 @@
       "preview": "vite preview"
     },
     "dependencies": {
+      "@thirdweb-dev/chains": "^0.1.83",
+      "@thirdweb-dev/react": "^4.4.8",
+      "@thirdweb-dev/sdk": "^4.0.30",
       "ethers": "^5.7.2",
       "lucide-react": "^0.263.1",
       "react": "^18.2.0",
