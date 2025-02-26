@@ -22,7 +22,7 @@ const RedeemForm = () => {
   const [redeemMode, setRedeemMode] = useState('all'); // 'all' or 'custom'
   const [fundAmount, setFundAmount] = useState('10');
   const [showFundingForm, setShowFundingForm] = useState(false);
-  const [disabledReason, setDisabledReason] = useState('');
+  const [buttonMessage, setButtonMessage] = useState('');
 
   // Update redeem amount when clicksPerToken changes or when switching modes
   useEffect(() => {
@@ -89,64 +89,31 @@ const RedeemForm = () => {
     setRedeemAmount(clampedValue);
   };
   
-  // Check each condition that might disable the button and set the reason
-  useEffect(() => {
-    if (!mainWallet.connected) {
-      setDisabledReason('Wallet not connected');
-    } else if (gasWallet.balance === "0") {
-      setDisabledReason('Gas wallet has no MON');
-    } else if (!contractHasTokens) {
-      setDisabledReason('Contract has no tokens');
-    } else if (redeemableTokens === "0") {
-      setDisabledReason('No tokens to redeem');
-    } else if (redeemMode === 'custom' && redeemAmount < clicksPerToken) {
-      setDisabledReason(`Need at least ${clicksPerToken} points`);
-    } else if (isRedeemPending) {
-      setDisabledReason('Redeem already in progress');
-    } else if (confirmedScore === 0) {
-      setDisabledReason('No confirmed score to redeem');
-    } else if (maxTokens === 0) {
-      setDisabledReason(`Need at least ${clicksPerToken} points`);
-    } else {
-      setDisabledReason('');
-    }
-  }, [
-    mainWallet.connected, 
-    gasWallet.balance, 
-    contractHasTokens, 
-    redeemableTokens, 
-    redeemMode, 
-    redeemAmount, 
-    clicksPerToken, 
-    isRedeemPending,
-    confirmedScore,
-    maxTokens
-  ]);
-  
-  // Console log the state for debugging
-  useEffect(() => {
-    console.log({
-      walletConnected: mainWallet.connected,
-      gasBalance: gasWallet.balance,
-      hasTokens: contractHasTokens,
-      redeemableTokens,
-      confirmedScore,
-      clicksPerToken,
-      maxTokens,
-      pendingRedeem: isRedeemPending,
-      disabledReason
-    });
-  }, [disabledReason]);
-  
+  // Simplified button logic - enable as soon as score ≥ clicksPerToken
   // Determine if the redeem button should be disabled
   const isRedeemDisabled = 
     !mainWallet.connected || 
     gasWallet.balance === "0" || 
     !contractHasTokens || 
-    redeemableTokens === "0" || 
-    (redeemMode === 'custom' && redeemAmount < clicksPerToken) ||
-    isRedeemPending || 
-    maxTokens === 0;
+    confirmedScore < clicksPerToken || // Simplified condition - just check if score is enough 
+    isRedeemPending;
+
+  // Set an informative message for why the button is disabled
+  useEffect(() => {
+    if (!mainWallet.connected) {
+      setButtonMessage('Connect wallet to redeem');
+    } else if (gasWallet.balance === "0") {
+      setButtonMessage('Gas wallet needs MON');
+    } else if (!contractHasTokens) {
+      setButtonMessage('Contract needs tokens');
+    } else if (confirmedScore < clicksPerToken) {
+      setButtonMessage(`Need at least ${clicksPerToken} points`);
+    } else if (isRedeemPending) {
+      setButtonMessage('Redemption in progress');
+    } else {
+      setButtonMessage('');
+    }
+  }, [mainWallet.connected, gasWallet.balance, contractHasTokens, confirmedScore, clicksPerToken, isRedeemPending]);
   
   // Total score including pending clicks
   const totalScore = confirmedScore + pendingClicks;
@@ -173,7 +140,7 @@ const RedeemForm = () => {
         </div>
         <div className="flex justify-between mb-1">
           <span>Redeemable Tokens:</span>
-          <span className="font-semibold">{redeemableTokens} $COOKIE</span>
+          <span className="font-semibold">{maxTokens} $COOKIE</span>
         </div>
         <div className="flex justify-between text-xs text-gray-500">
           <span>Rate:</span>
@@ -256,9 +223,9 @@ const RedeemForm = () => {
           )}
         </button>
         
-        {disabledReason && (
+        {buttonMessage && (
           <div className="mt-2 text-xs text-amber-600 text-center">
-            {disabledReason}
+            {buttonMessage}
           </div>
         )}
       </div>

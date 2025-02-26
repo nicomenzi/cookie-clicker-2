@@ -8,6 +8,7 @@ import CookieButton from './components/cookie/CookieButton';
 import ScoreDisplay from './components/cookie/ScoreDisplay';
 import RedeemForm from './components/cookie/RedeemForm';
 import TransactionList from './components/transactions/TransactionList';
+import TransactionStatusIndicator from './components/transactions/TransactionStatusIndicator';
 import { COOKIE_TOKEN_ADDRESS, COOKIE_CLICKER_ADDRESS } from './constants/contracts';
 
 const App = () => {
@@ -35,6 +36,9 @@ const App = () => {
             <p>$COOKIE Token Contract: {COOKIE_TOKEN_ADDRESS}</p>
             <p>Cookie Clicker Contract: {COOKIE_CLICKER_ADDRESS}</p>
           </div>
+          
+          {/* Fixed position transaction status indicator */}
+          <TransactionStatusIndicator />
         </div>
       </GameProvider>
     </WalletProvider>
