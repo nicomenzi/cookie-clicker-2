@@ -1,4 +1,5 @@
 // src/components/cookie/RedeemForm.jsx
+// Enhanced with pending transaction handling and improved performance
 import React, { useState, useEffect } from 'react';
 import { useWalletContext } from '../../context/WalletContext';
 import { useGameContext } from '../../context/GameContext';
@@ -8,7 +9,9 @@ import { fundClickerContract } from '../../services/blockchain';
 const RedeemForm = () => {
   const { mainWallet, gasWallet } = useWalletContext();
   const { 
-    score, 
+    confirmedScore, 
+    pendingClicks,
+    transactions,
     cookieBalance, 
     redeemableTokens,
     clicksPerToken, 
@@ -31,6 +34,11 @@ const RedeemForm = () => {
       setRedeemAmount(clicksPerToken);
     }
   }, [clicksPerToken, redeemMode]);
+  
+  // Check if there are pending redeem transactions
+  const isRedeemPending = transactions.some(
+    tx => tx.type === 'Redeem' && tx.status === 'pending'
+  );
   
   const onRedeemHandler = async () => {
     try {
@@ -69,15 +77,15 @@ const RedeemForm = () => {
     }
   };
   
-  // Calculate maximum tokens user can redeem
-  const maxTokens = Math.floor(score / clicksPerToken);
+  // Calculate maximum tokens user can redeem (based only on confirmed score)
+  const maxTokens = Math.floor(confirmedScore / clicksPerToken);
   const maxRedeemableScore = maxTokens * clicksPerToken;
   
   // Update custom redeem amount when user changes the input
   const handleCustomAmountChange = (e) => {
     const value = parseInt(e.target.value) || 0;
-    // Clamp the value between 0 and maximum redeemable
-    const clampedValue = Math.min(Math.max(0, value), score);
+    // Clamp the value between 0 and maximum redeemable (based on confirmed score)
+    const clampedValue = Math.min(Math.max(0, value), confirmedScore);
     setRedeemAmount(clampedValue);
   };
   
@@ -87,7 +95,11 @@ const RedeemForm = () => {
     gasWallet.balance === "0" || 
     !contractHasTokens || 
     redeemableTokens === "0" || 
-    (redeemMode === 'custom' && redeemAmount < clicksPerToken);
+    (redeemMode === 'custom' && redeemAmount < clicksPerToken) ||
+    isRedeemPending; // Disable if there's a pending redeem
+  
+  // Total score including pending clicks
+  const totalScore = confirmedScore + pendingClicks;
   
   return (
     <div className="bg-white rounded-lg shadow-lg p-4 w-full max-w-md mb-4">
@@ -96,7 +108,14 @@ const RedeemForm = () => {
       <div className="mb-4 text-sm">
         <div className="flex justify-between mb-1">
           <span>Current Score:</span>
-          <span className="font-semibold">{score} points</span>
+          <span className="font-semibold">
+            {confirmedScore} points
+            {pendingClicks > 0 && (
+              <span className="text-yellow-600 ml-1">
+                (+{pendingClicks} pending)
+              </span>
+            )}
+          </span>
         </div>
         <div className="flex justify-between mb-1">
           <span>Token Balance:</span>
@@ -136,17 +155,31 @@ const RedeemForm = () => {
           </button>
         </div>
         
+        {isRedeemPending && (
+          <div className="mb-3 text-sm text-yellow-600 flex items-center">
+            <span className="inline-block w-3 h-3 rounded-full border-2 border-yellow-400 border-t-transparent animate-spin mr-1"></span>
+            Redeem transaction pending...
+          </div>
+        )}
+        
         {redeemMode === 'all' ? (
           <div className="mb-3 text-sm">
             Will redeem <span className="font-semibold">{maxRedeemableScore} points</span> for 
             <span className="font-semibold"> {maxTokens} $COOKIE</span> tokens
+            
+            {pendingClicks > 0 && (
+              <div className="mt-1 text-xs text-yellow-600">
+                <AlertCircle size={14} className="inline mr-1" />
+                Only confirmed score can be redeemed ({confirmedScore} points)
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex items-center gap-2 mb-3">
             <input
               type="number"
               min={clicksPerToken}
-              max={score}
+              max={confirmedScore}
               step={clicksPerToken}
               value={redeemAmount}
               onChange={handleCustomAmountChange}
@@ -161,9 +194,16 @@ const RedeemForm = () => {
         <button
           onClick={onRedeemHandler}
           disabled={isRedeemDisabled}
-          className="w-full bg-amber-500 hover:bg-amber-600 disabled:bg-amber-300 text-white px-4 py-2 rounded"
+          className="w-full bg-amber-500 hover:bg-amber-600 disabled:bg-amber-300 text-white px-4 py-2 rounded flex items-center justify-center"
         >
-          Redeem for $COOKIE
+          {isRedeemPending ? (
+            <>
+              <span className="inline-block w-4 h-4 rounded-full border-2 border-white border-t-transparent animate-spin mr-2"></span>
+              Processing...
+            </>
+          ) : (
+            "Redeem for $COOKIE"
+          )}
         </button>
       </div>
       
