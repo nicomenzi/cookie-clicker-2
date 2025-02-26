@@ -32,39 +32,62 @@ export const GameProvider = ({ children }) => {
   const [confirmedScore, setConfirmedScore] = useState(0);
   const [pendingClicks, setPendingClicks] = useState(0);
   const [processingTxCount, setProcessingTxCount] = useState(0);
-  const MAX_CONCURRENT_TX = 3; // Allow up to 3 transactions to process simultaneously
-  
+  const MAX_CONCURRENT_TX = 5; // Allow up to 5 transactions to process simultaneously
+  const [isLoadingTransactions, setIsLoadingTransactions] = useState(false);
+
   // Handle cookie click
-  const handleClick = async (e) => {
-    if (!mainWallet.connected) {
-      throw new Error("Please connect your wallet first!");
-    }
-    
-    if (!gasWallet.instance || gasWallet.balance === "0") {
-      throw new Error("Please fund your gas wallet with MON first!");
-    }
-    
-    // Create animation cookie
-    const cookie = {
-      id: Date.now(),
-      x: e.clientX,
-      y: e.clientY,
+const handleClick = async (e) => {
+  if (!mainWallet.connected) {
+    throw new Error("Please connect your wallet first!");
+  }
+  
+  if (!gasWallet.instance || gasWallet.balance === "0") {
+    throw new Error("Please fund your gas wallet with MON first!");
+  }
+  
+  // Create animation cookie
+  const cookie = {
+    id: Date.now(),
+    x: e.clientX,
+    y: e.clientY,
+  };
+  setCookies(prev => [...prev, cookie]);
+  
+  // Add a pending transaction to history for click
+  const txId = addPendingTransaction('Click', { points: 1 });
+  
+  // Add to queue
+  setTxQueue(prev => [...prev, { type: 'Click', id: txId }]);
+  
+  // Update pending clicks count
+  setPendingClicks(prev => prev + 1);
+};
+
+const addPendingTransaction = (type, details) => {
+    const txId = Date.now(); // Unique identifier
+    const pendingTx = {
+      id: txId,
+      type,
+      status: 'pending',
+      timestamp: new Date().toLocaleTimeString(),
+      ...details
     };
-    setCookies(prev => [...prev, cookie]);
     
-    // Add a pending transaction to history for click
-    const txId = addPendingTransaction('Click', { points: 1 });
-    
-    // Add to queue
-    setTxQueue(prev => [...prev, { type: 'Click', id: txId }]);
-    
-    // Update pending clicks count
-    setPendingClicks(prev => prev + 1);
+    setTransactions(prev => [pendingTx, ...prev.slice(0, 19)]); // Keep last 20
+    return txId;
+  };
+
+  const updateTransaction = (txId, details) => {
+    setTransactions(prev => 
+      prev.map(tx => 
+        tx.id === txId ? { ...tx, ...details } : tx
+      )
+    );
   };
   
   
-  // Handle redeem tokens
-  const handleRedeem = async (amount = 0) => {
+  // Updated handleRedeem function in GameContext
+const handleRedeem = async (amount = 0) => {
     if (!mainWallet.connected) {
       throw new Error("Please connect your wallet first!");
     }
@@ -77,30 +100,28 @@ export const GameProvider = ({ children }) => {
       throw new Error("Contract has no tokens to distribute. Please fund it first.");
     }
     
-    // If amount is 0, the contract will redeem all eligible points
-    // If amount is set, ensure it's divisible by clicksPerToken
+    console.log("Starting redeem with amount:", amount);
+    
+    // Calculate how many points will be redeemed
     let pointsToRedeem = amount;
-    if (amount > 0) {
-      // Make sure amount is divisible by clicksPerToken
-      if (amount % clicksPerToken !== 0) {
-        throw new Error(`Amount must be divisible by ${clicksPerToken}`);
-      }
-      
-      // Check if player has enough score
-      if (score < amount) {
-        throw new Error(`Not enough points! You need at least ${amount} points.`);
-      }
-    } else {
-      // Calculate maximum redeemable points
-      pointsToRedeem = Math.floor(score / clicksPerToken) * clicksPerToken;
-      
-      if (pointsToRedeem === 0) {
-        throw new Error(`You need at least ${clicksPerToken} points to redeem for 1 token.`);
-      }
+    if (amount === 0) {
+      // Calculate redeemable points based on confirmed score
+      pointsToRedeem = Math.floor(confirmedScore / clicksPerToken) * clicksPerToken;
+    }
+    
+    // Safety check
+    if (pointsToRedeem === 0) {
+      throw new Error(`You need at least ${clicksPerToken} points to redeem for 1 token.`);
+    }
+    
+    if (pointsToRedeem > confirmedScore) {
+      throw new Error(`Not enough confirmed points! You need at least ${pointsToRedeem} points.`);
     }
     
     // Calculate tokens to receive
     const tokensToReceive = pointsToRedeem / clicksPerToken;
+    
+    console.log(`Redeeming ${pointsToRedeem} points for ${tokensToReceive} tokens`);
     
     // Add a pending transaction to history
     const txId = addPendingTransaction('Redeem', { 
@@ -114,33 +135,6 @@ export const GameProvider = ({ children }) => {
       id: txId, 
       amount: pointsToRedeem 
     }]);
-    
-    // Update score immediately for better UX
-    setScore(prev => prev - pointsToRedeem);
-  };
-  
-  // Add a pending transaction to history
-  const addPendingTransaction = (type, details) => {
-    const txId = Date.now(); // Unique identifier
-    const pendingTx = {
-      id: txId,
-      type,
-      status: 'pending',
-      timestamp: new Date().toLocaleTimeString(),
-      ...details
-    };
-    
-    setTransactions(prev => [pendingTx, ...prev.slice(0, 19)]); // Keep last 20
-    return txId;
-  };
-  
-  // Update transaction when confirmed or failed
-  const updateTransaction = (txId, details) => {
-    setTransactions(prev => 
-      prev.map(tx => 
-        tx.id === txId ? { ...tx, ...details } : tx
-      )
-    );
   };
   
   // Process transaction queue
@@ -149,7 +143,7 @@ export const GameProvider = ({ children }) => {
       // If queue is empty or no gas wallet, do nothing
       if (txQueue.length === 0 || !gasWallet.instance) return;
       
-      // Check if we can process more transactions (up to MAX_CONCURRENT_TX)
+      // Process only if we haven't hit the maximum number of concurrent transactions
       if (processingTxCount >= MAX_CONCURRENT_TX) return;
       
       // Get the next transaction from the queue
@@ -161,7 +155,7 @@ export const GameProvider = ({ children }) => {
       // Increment processing counter
       setProcessingTxCount(prev => prev + 1);
       
-      // Process the transaction asynchronously
+      // Process independently (don't await, let it run in parallel)
       processTransaction(nextTx).finally(() => {
         // Decrement processing counter when done
         setProcessingTxCount(prev => prev - 1);
@@ -169,120 +163,181 @@ export const GameProvider = ({ children }) => {
     };
     
     processQueue();
-  }, [txQueue, processingTxCount, gasWallet.instance, mainWallet.provider, clicksPerToken]);
+  }, [txQueue, processingTxCount, gasWallet.instance]);
   
   const processTransaction = async (tx) => {
     try {
-      // Process based on transaction type
       if (tx.type === 'Click') {
-        try {
-          // Send transaction using gas wallet
-          const response = await recordClick(gasWallet.instance);
-          
-          // Update transaction in history with hash but still pending
-          updateTransaction(tx.id, {
-            txHash: response.hash
-          });
-          
-          // Wait for transaction to be mined
-          await response.wait();
-          
-          // Update transaction in history as confirmed
-          updateTransaction(tx.id, {
-            status: 'confirmed'
-          });
-          
-          // Update confirmed score and decrease pending clicks
-          setConfirmedScore(prev => prev + 1);
-          setPendingClicks(prev => Math.max(0, prev - 1));
-        } catch (error) {
-          console.error("Error clicking cookie:", error);
-          
-          // Update transaction as failed
-          updateTransaction(tx.id, {
-            status: 'failed',
-            error: error.message
-          });
-          
-          // Decrease pending clicks count
-          setPendingClicks(prev => Math.max(0, prev - 1));
-        }
+        // Send transaction using gas wallet
+        const response = await recordClick(gasWallet.instance);
+        
+        // Update transaction in history with hash but still pending
+        updateTransaction(tx.id, {
+          txHash: response.hash
+        });
+        
+        // Wait for transaction to be mined
+        await response.wait();
+        
+        // Update transaction in history as confirmed
+        updateTransaction(tx.id, {
+          status: 'confirmed'
+        });
+        
+        // Update confirmed score and decrease pending clicks
+        setConfirmedScore(prev => prev + 1);
+        setPendingClicks(prev => Math.max(0, prev - 1));
       } else if (tx.type === 'Redeem') {
-        try {
-          // Send transaction using gas wallet
-          const response = await redeemCookies(gasWallet.instance, tx.amount);
-          
-          // Update transaction in history with hash but still pending
-          updateTransaction(tx.id, {
-            txHash: response.hash
-          });
-          
-          // Wait for transaction to be mined
-          await response.wait();
-          
-          // Update transaction in history as confirmed
-          updateTransaction(tx.id, {
-            status: 'confirmed'
-          });
-          
-          // Reload user data after redeeming
-          await loadUserData();
-        } catch (error) {
-          console.error("Error redeeming tokens:", error);
-          
-          // Update transaction as failed
-          updateTransaction(tx.id, {
-            status: 'failed',
-            error: error.message
-          });
-          
-          // Revert the score update if needed
-          // This is now handled by confirmedScore and pendingClicks
-        }
+        // Send transaction using gas wallet
+        const response = await redeemCookies(gasWallet.instance, tx.amount);
+        
+        // Update transaction in history with hash but still pending
+        updateTransaction(tx.id, {
+          txHash: response.hash
+        });
+        
+        // Wait for transaction to be mined
+        await response.wait();
+        
+        // Update transaction in history as confirmed
+        updateTransaction(tx.id, {
+          status: 'confirmed'
+        });
+        
+        // Reload user data after redeeming
+        await loadUserData();
       }
     } catch (error) {
       console.error("Error processing transaction:", error);
       
-      // If there was a nonce error, reset the nonce
+      // Try to reset nonce if needed
       if (error.message && (error.message.includes("nonce") || error.message.includes("replacement transaction underpriced"))) {
         try {
           if (gasWallet.instance && mainWallet.provider) {
-            gasWallet.instance.currentNonce = await mainWallet.provider.getTransactionCount(gasWallet.instance.getAddress());
-            console.log("Reset nonce to", gasWallet.instance.currentNonce);
+            await gasWallet.instance.refreshNonce();
           }
         } catch (nonceError) {
           console.error("Error resetting nonce:", nonceError);
         }
       }
+      
+      // Update transaction status as failed
+      if (tx.type === 'Click') {
+        updateTransaction(tx.id, {
+          status: 'failed',
+          error: error.message
+        });
+        
+        // Decrease pending clicks count
+        setPendingClicks(prev => Math.max(0, prev - 1));
+      } else if (tx.type === 'Redeem') {
+        updateTransaction(tx.id, {
+          status: 'failed',
+          error: error.message
+        });
+      }
     }
   };
 
   // Load user data (score and token balance)
+  // Updated loadUserData function in GameContext
   const loadUserData = async () => {
     try {
       if (!mainWallet.provider || !gasWallet.address) return;
       
+      console.log("Loading user data...");
+      
+      // Get contract first to read configuration
+      const clickerContract = getCookieClickerContract(mainWallet.provider);
+      
+      // Get clicks per token
+      try {
+        const clicksPerToken = await clickerContract.clicksPerToken();
+        setClicksPerToken(clicksPerToken.toNumber());
+      } catch (error) {
+        console.error("Error getting clicksPerToken:", error);
+      }
+      
       // Get user score using the gas wallet address (not main wallet)
       try {
         const score = await getPlayerScore(mainWallet.provider, gasWallet.address);
+        console.log("Player score from blockchain:", score);
         setConfirmedScore(score);
-        
-        // Calculate pending clicks based on transactions
-        const pendingClickTxs = transactions.filter(
-          tx => tx.type === 'Click' && tx.status === 'pending'
-        ).length;
-        
-        setPendingClicks(pendingClickTxs);
-        
-        // Total score is confirmed + pending
-        setScore(score + pendingClickTxs);
       } catch (error) {
         console.error("Error getting player score:", error);
       }
       
-      // Rest of loadUserData remains the same...
+      // Get redeemable tokens
+      try {
+        const redeemable = await getRedeemableTokens(mainWallet.provider, gasWallet.address);
+        setRedeemableTokens(redeemable);
+      } catch (error) {
+        console.error("Error getting redeemable tokens:", error);
+      }
+      
+      // Get $COOKIE token balance
+      try {
+        const tokenContract = getCookieTokenContract(mainWallet.provider);
+        const decimals = await tokenContract.decimals();
+        
+        // Get token balance for the gas wallet address
+        const balance = await tokenContract.balanceOf(gasWallet.address);
+        setCookieBalance(ethers.utils.formatUnits(balance, decimals));
+      } catch (error) {
+        console.error("Error getting token balance:", error);
+      }
+      
+      // Check if contract has tokens
+      try {
+        const hasTokens = await checkContractHasTokens(mainWallet.provider);
+        setContractHasTokens(hasTokens);
+      } catch (error) {
+        console.error("Error checking contract tokens:", error);
+      }
+      
+      // Fetch transaction history from the blockchain
+      await fetchTransactionHistory();
     } catch (error) {
       console.error("Error loading user data:", error);
+    }
+  };
+
+  const fetchTransactionHistory = async () => {
+    if (!mainWallet.provider || !gasWallet.address) return;
+    
+    setIsLoadingTransactions(true);
+    
+    try {
+      // Fetch confirmed transactions from blockchain
+      // Only look back 500 blocks for better performance
+      const confirmedTxs = await fetchTransactionsFromBlockchain(mainWallet.provider, gasWallet.address, 500);
+      
+      // Get pending transactions (ones in our local state that haven't been confirmed yet)
+      const pendingTxs = transactions.filter(tx => tx.status === 'pending');
+      
+      // Filter out any pending transactions that match confirmed ones
+      // (in case they were confirmed but our UI didn't update)
+      const confirmedTxHashes = new Set(confirmedTxs.map(tx => tx.txHash));
+      const filteredPendingTxs = pendingTxs.filter(tx => 
+        !tx.txHash || !confirmedTxHashes.has(tx.txHash)
+      );
+      
+      // Update pending clicks count based on pending click transactions
+      const pendingClickCount = filteredPendingTxs.filter(tx => tx.type === 'Click').length;
+      setPendingClicks(pendingClickCount);
+      
+      // Combine pending and confirmed transactions
+      const combinedTxs = [...filteredPendingTxs, ...confirmedTxs];
+      
+      // Only keep the most recent 20 transactions to avoid clutter
+      const limitedTxs = combinedTxs.slice(0, 20);
+      
+      // Update transaction list
+      setTransactions(limitedTxs);
+    } catch (error) {
+      console.error("Error fetching transaction history:", error);
+    } finally {
+      setIsLoadingTransactions(false);
     }
   };
   
@@ -296,29 +351,6 @@ export const GameProvider = ({ children }) => {
     return () => clearTimeout(timer);
   }, [cookies]);
   
-  // Load transaction history from localStorage
-  useEffect(() => {
-    if (mainWallet.address) {
-      const storageKey = `monad_tx_history_${mainWallet.address.toLowerCase()}`;
-      const storedTx = localStorage.getItem(storageKey);
-      if (storedTx) {
-        try {
-          const parsedTx = JSON.parse(storedTx);
-          setTransactions(parsedTx);
-        } catch (error) {
-          console.error("Error parsing stored transactions:", error);
-        }
-      }
-    }
-  }, [mainWallet.address]);
-  
-  // Save transaction history to localStorage
-  useEffect(() => {
-    if (mainWallet.address && transactions.length > 0) {
-      const storageKey = `monad_tx_history_${mainWallet.address.toLowerCase()}`;
-      localStorage.setItem(storageKey, JSON.stringify(transactions));
-    }
-  }, [transactions, mainWallet.address]);
   
   // Periodically reload user data
   useEffect(() => {
@@ -327,7 +359,7 @@ export const GameProvider = ({ children }) => {
       
       const interval = setInterval(() => {
         loadUserData();
-      }, 10000); // Reload every 10 seconds
+      }, 15000); // Reload every 15 seconds
       
       return () => clearInterval(interval);
     }
@@ -344,10 +376,14 @@ export const GameProvider = ({ children }) => {
       clicksPerToken,
       cookies,
       transactions,
+      isLoadingTransactions,
       contractHasTokens,
       handleClick,
       handleRedeem,
       loadUserData,
+      fetchTransactionHistory,
+      mainWallet, // Add this for TransactionList
+      gasWallet, // Add this for TransactionList
     }}>
       {children}
     </GameContext.Provider>

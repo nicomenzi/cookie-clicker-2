@@ -1,6 +1,6 @@
 // src/constants/contracts.js
 export const COOKIE_TOKEN_ADDRESS = "0x8e378075aF71d3232be905433d612C96E38726DB";
-export const COOKIE_CLICKER_ADDRESS = "0x803E393Ca6726960D843E9aEcF16D54D824c8c5a";
+export const COOKIE_CLICKER_ADDRESS = "0xC133d1082457587929951bA9a20bc529577B7a0e";
 
 export const COOKIE_TOKEN_ABI = [
     "function balanceOf(address owner) view returns (uint256)",

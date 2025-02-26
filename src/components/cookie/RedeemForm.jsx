@@ -1,5 +1,4 @@
 // src/components/cookie/RedeemForm.jsx
-// Enhanced with pending transaction handling and improved performance
 import React, { useState, useEffect } from 'react';
 import { useWalletContext } from '../../context/WalletContext';
 import { useGameContext } from '../../context/GameContext';
@@ -23,6 +22,7 @@ const RedeemForm = () => {
   const [redeemMode, setRedeemMode] = useState('all'); // 'all' or 'custom'
   const [fundAmount, setFundAmount] = useState('10');
   const [showFundingForm, setShowFundingForm] = useState(false);
+  const [disabledReason, setDisabledReason] = useState('');
 
   // Update redeem amount when clicksPerToken changes or when switching modes
   useEffect(() => {
@@ -89,6 +89,55 @@ const RedeemForm = () => {
     setRedeemAmount(clampedValue);
   };
   
+  // Check each condition that might disable the button and set the reason
+  useEffect(() => {
+    if (!mainWallet.connected) {
+      setDisabledReason('Wallet not connected');
+    } else if (gasWallet.balance === "0") {
+      setDisabledReason('Gas wallet has no MON');
+    } else if (!contractHasTokens) {
+      setDisabledReason('Contract has no tokens');
+    } else if (redeemableTokens === "0") {
+      setDisabledReason('No tokens to redeem');
+    } else if (redeemMode === 'custom' && redeemAmount < clicksPerToken) {
+      setDisabledReason(`Need at least ${clicksPerToken} points`);
+    } else if (isRedeemPending) {
+      setDisabledReason('Redeem already in progress');
+    } else if (confirmedScore === 0) {
+      setDisabledReason('No confirmed score to redeem');
+    } else if (maxTokens === 0) {
+      setDisabledReason(`Need at least ${clicksPerToken} points`);
+    } else {
+      setDisabledReason('');
+    }
+  }, [
+    mainWallet.connected, 
+    gasWallet.balance, 
+    contractHasTokens, 
+    redeemableTokens, 
+    redeemMode, 
+    redeemAmount, 
+    clicksPerToken, 
+    isRedeemPending,
+    confirmedScore,
+    maxTokens
+  ]);
+  
+  // Console log the state for debugging
+  useEffect(() => {
+    console.log({
+      walletConnected: mainWallet.connected,
+      gasBalance: gasWallet.balance,
+      hasTokens: contractHasTokens,
+      redeemableTokens,
+      confirmedScore,
+      clicksPerToken,
+      maxTokens,
+      pendingRedeem: isRedeemPending,
+      disabledReason
+    });
+  }, [disabledReason]);
+  
   // Determine if the redeem button should be disabled
   const isRedeemDisabled = 
     !mainWallet.connected || 
@@ -96,7 +145,8 @@ const RedeemForm = () => {
     !contractHasTokens || 
     redeemableTokens === "0" || 
     (redeemMode === 'custom' && redeemAmount < clicksPerToken) ||
-    isRedeemPending; // Disable if there's a pending redeem
+    isRedeemPending || 
+    maxTokens === 0;
   
   // Total score including pending clicks
   const totalScore = confirmedScore + pendingClicks;
@@ -205,6 +255,12 @@ const RedeemForm = () => {
             "Redeem for $COOKIE"
           )}
         </button>
+        
+        {disabledReason && (
+          <div className="mt-2 text-xs text-amber-600 text-center">
+            {disabledReason}
+          </div>
+        )}
       </div>
       
       {!contractHasTokens && mainWallet.connected && (

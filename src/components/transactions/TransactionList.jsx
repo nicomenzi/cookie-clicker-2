@@ -4,7 +4,13 @@ import { useGameContext } from '../../context/GameContext';
 import TransactionItem from './TransactionItem';
 
 const TransactionList = () => {
-  const { transactions, processingTxCount } = useGameContext();
+  const { 
+    transactions, 
+    processingTxCount, 
+    isLoadingTransactions,
+    mainWallet,
+    gasWallet
+  } = useGameContext();
   
   // Count pending transactions by type
   const pendingCounts = transactions.reduce((acc, tx) => {
@@ -15,6 +21,13 @@ const TransactionList = () => {
     return acc;
   }, { total: 0 });
   
+  // Check if wallet is connected but we have no transactions
+  const isConnectedWithNoTransactions = 
+    mainWallet.connected && 
+    gasWallet.address && 
+    transactions.length === 0 && 
+    !isLoadingTransactions;
+
   return (
     <div className="bg-white rounded-lg shadow-lg p-4 w-full max-w-md mb-6">
       <div className="flex justify-between items-center mb-2">
@@ -27,6 +40,15 @@ const TransactionList = () => {
           </div>
         )}
       </div>
+      
+      {isLoadingTransactions && (
+        <div className="flex items-center justify-center py-4">
+          <div className="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full mr-2"></div>
+          <div className="text-sm text-gray-500">
+            Loading transactions...
+          </div>
+        </div>
+      )}
       
       {processingTxCount > 0 && (
         <div className="bg-blue-50 rounded p-2 mb-2 flex items-center">
@@ -49,13 +71,25 @@ const TransactionList = () => {
         </div>
       )}
       
-      {transactions.length === 0 ? (
-        <div className="text-gray-500 text-sm">No transactions yet</div>
-      ) : (
+      {isConnectedWithNoTransactions && (
+        <div className="text-gray-500 text-sm text-center py-4">
+          No transactions found for this wallet.
+          <br />
+          Start clicking to earn cookies!
+        </div>
+      )}
+      
+      {!isLoadingTransactions && transactions.length > 0 && (
         <div className="space-y-2">
           {transactions.map((tx) => (
-            <TransactionItem key={tx.id} transaction={tx} />
+            <TransactionItem key={tx.id || tx.txHash} transaction={tx} />
           ))}
+        </div>
+      )}
+      
+      {!mainWallet.connected && (
+        <div className="text-gray-500 text-sm text-center py-4">
+          Connect your wallet to see transaction history
         </div>
       )}
     </div>

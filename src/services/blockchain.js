@@ -141,12 +141,12 @@ export const getRedeemableTokens = async (provider, address) => {
       // Get token decimals
       const decimals = await tokenContract.decimals();
       
-      // Get raw redeemable tokens
+      // Get raw redeemable tokens (this is the number of whole tokens)
       const rawTokens = await contract.getRedeemableTokens(address);
       
-      // Convert to formatted string with proper decimals
-      // This represents the actual number of full tokens (not wei)
-      return ethers.utils.formatUnits(rawTokens.mul(ethers.BigNumber.from(10).pow(decimals)), decimals);
+      // Simply format the result - no need to multiply by 10^decimals because 
+      // the contract already returns the number of whole tokens
+      return rawTokens.toString();
     } catch (error) {
       console.error("Error getting redeemable tokens:", error);
       return "0";
@@ -201,88 +201,146 @@ export const redeemCookies = async (gasWallet, amount = 0) => {
  * Fetch transaction history from blockchain
  * @param {ethers.providers.Provider} provider - Ethereum provider
  * @param {string} walletAddress - Wallet address to check
+ * @param {number} blockCount - Number of blocks to look back (default: 1000)
  * @returns {Promise<Array>} - Array of transactions
  */
-export const fetchTransactionHistory = async (provider, walletAddress) => {
-  try {
-    // Get the recent transactions from the wallet
-    const filter = {
-      fromBlock: Math.max(0, await provider.getBlockNumber() - 1000), // Last ~1000 blocks
-      address: COOKIE_CLICKER_ADDRESS, // Filter to only cookie clicker contract
-    };
-
-    const logs = await provider.getLogs(filter);
-    
-    // Create contract interface to decode logs
-    const clickerInterface = new ethers.utils.Interface(COOKIE_CLICKER_ABI);
-    
-    // Process the logs to find our transactions
-    const transactions = [];
-    
-    for (const log of logs) {
-      try {
-        // Try to parse the log
-        const parsedLog = clickerInterface.parseLog(log);
-        
-        // Skip logs that aren't our events
-        if (!parsedLog) continue;
-        
-        // Check if this transaction is from our wallet
-        if (parsedLog.name === 'Click' && 
-            parsedLog.args.player && 
-            parsedLog.args.player.toLowerCase() === walletAddress.toLowerCase()) {
+export const fetchTransactionHistory = async (provider, walletAddress, blockCount = 1000) => {
+    try {
+      console.log(`Fetching transaction history for ${walletAddress}`);
+      
+      // Get the current block number
+      const currentBlock = await provider.getBlockNumber();
+      console.log(`Current block: ${currentBlock}`);
+      
+      // Calculate from block (going back blockCount blocks)
+      const fromBlock = Math.max(0, currentBlock - blockCount);
+      console.log(`Fetching events from block ${fromBlock}`);
+      
+      // Create filter for Click events
+      const clickFilter = {
+        fromBlock,
+        address: COOKIE_CLICKER_ADDRESS,
+        topics: [
+          ethers.utils.id("Click(address,uint256)"),
+          ethers.utils.hexZeroPad(walletAddress.toLowerCase(), 32)
+        ]
+      };
+      
+      // Create filter for Redeem events
+      const redeemFilter = {
+        fromBlock,
+        address: COOKIE_CLICKER_ADDRESS,
+        topics: [
+          ethers.utils.id("Redeem(address,uint256,uint256)"),
+          ethers.utils.hexZeroPad(walletAddress.toLowerCase(), 32)
+        ]
+      };
+      
+      // Create filter for ContractFunded events
+      const fundedFilter = {
+        fromBlock,
+        address: COOKIE_CLICKER_ADDRESS,
+        topics: [
+          ethers.utils.id("ContractFunded(address,uint256)"),
+          ethers.utils.hexZeroPad(walletAddress.toLowerCase(), 32)
+        ]
+      };
+      
+      // Get logs in parallel
+      const [clickLogs, redeemLogs, fundedLogs] = await Promise.all([
+        provider.getLogs(clickFilter),
+        provider.getLogs(redeemFilter),
+        provider.getLogs(fundedFilter)
+      ]);
+      
+      console.log(`Found ${clickLogs.length} click events, ${redeemLogs.length} redeem events, and ${fundedLogs.length} funding events`);
+      
+      // Create contract interface to decode logs
+      const clickerInterface = new ethers.utils.Interface(COOKIE_CLICKER_ABI);
+      
+      // Process the logs to create transactions
+      const transactions = [];
+      
+      // Process Click events
+      for (const log of clickLogs) {
+        try {
+          const parsedLog = clickerInterface.parseLog(log);
           
-          // Get the score change from the previous score if possible
-          const scoreChange = 1; // Default to 1 for single clicks
+          // Get block info for timestamp
+          const block = await provider.getBlock(log.blockNumber);
           
-          // Add to our transactions
+          // Add to transactions
           transactions.push({
             id: log.transactionHash,
             type: 'Click',
             txHash: log.transactionHash,
             status: 'confirmed',
-            timestamp: new Date().toLocaleTimeString(),
-            points: scoreChange
+            timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
+            points: 1,
+            blockNumber: log.blockNumber
           });
+        } catch (error) {
+          console.error("Error parsing click log:", error);
         }
-        else if (parsedLog.name === 'Redeem' && 
-                parsedLog.args.player && 
-                parsedLog.args.player.toLowerCase() === walletAddress.toLowerCase()) {
+      }
+      
+      // Process Redeem events
+      for (const log of redeemLogs) {
+        try {
+          const parsedLog = clickerInterface.parseLog(log);
           
-          // Add to our transactions
+          // Get block info for timestamp
+          const block = await provider.getBlock(log.blockNumber);
+          
+          // Add to transactions
           transactions.push({
             id: log.transactionHash,
             type: 'Redeem',
             txHash: log.transactionHash,
             status: 'confirmed',
-            timestamp: new Date().toLocaleTimeString(),
+            timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
             points: -parsedLog.args.score.toNumber(),
-            tokens: parsedLog.args.tokens.toNumber()
+            tokens: parsedLog.args.tokens.toNumber(),
+            blockNumber: log.blockNumber
           });
+        } catch (error) {
+          console.error("Error parsing redeem log:", error);
         }
-        else if (parsedLog.name === 'ContractFunded' && 
-                parsedLog.args.funder && 
-                parsedLog.args.funder.toLowerCase() === walletAddress.toLowerCase()) {
+      }
+      
+      // Process ContractFunded events
+      for (const log of fundedLogs) {
+        try {
+          const parsedLog = clickerInterface.parseLog(log);
           
-          // Add funding transaction
+          // Get block info for timestamp
+          const block = await provider.getBlock(log.blockNumber);
+          
+          // Add to transactions
           transactions.push({
             id: log.transactionHash,
-            type: 'Fund Contract',
+            type: 'Fund',
             txHash: log.transactionHash,
             status: 'confirmed',
-            timestamp: new Date().toLocaleTimeString(),
-            amount: ethers.utils.formatUnits(parsedLog.args.amount, 18) + " $COOKIE"
+            timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
+            amount: ethers.utils.formatUnits(parsedLog.args.amount, 18) + " $COOKIE",
+            blockNumber: log.blockNumber
           });
+        } catch (error) {
+          console.error("Error parsing fund log:", error);
         }
-      } catch (error) {
-        // Skip logs we can't parse
-        continue;
       }
+      
+      // Sort transactions by block number (descending)
+      transactions.sort((a, b) => b.blockNumber - a.blockNumber);
+      
+      // Remove the blockNumber property (we don't need it in the UI)
+      return transactions.map(tx => {
+        const { blockNumber, ...txWithoutBlock } = tx;
+        return txWithoutBlock;
+      });
+    } catch (error) {
+      console.error("Error fetching transaction history:", error);
+      return [];
     }
-    
-    return transactions;
-  } catch (error) {
-    console.error("Error fetching transaction history:", error);
-    return [];
-  }
-};
+  };

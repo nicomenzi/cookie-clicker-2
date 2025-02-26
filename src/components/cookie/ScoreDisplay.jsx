@@ -1,6 +1,7 @@
 // src/components/cookie/ScoreDisplay.jsx
 import React from 'react';
 import { useGameContext } from '../../context/GameContext';
+import { AlertCircle } from 'lucide-react';
 
 const ScoreDisplay = () => {
   const { 
@@ -30,9 +31,18 @@ const ScoreDisplay = () => {
         You need {clicksPerToken} clicks for 1 $COOKIE token
       </div>
       
+      {/* Transaction processing indicator */}
       {processingTxCount > 0 && (
-        <div className="mt-2 text-xs text-blue-600">
+        <div className="mt-2 text-xs text-blue-600 flex items-center justify-center">
+          <span className="inline-block w-3 h-3 rounded-full border-2 border-blue-500 border-t-transparent animate-spin mr-1"></span>
           Processing {processingTxCount} transaction{processingTxCount > 1 ? 's' : ''}...
+        </div>
+      )}
+      
+      {pendingClicks > 10 && (
+        <div className="mt-1 text-xs text-amber-600 flex items-center justify-center">
+          <AlertCircle size={12} className="mr-1" />
+          {pendingClicks} clicks pending confirmation on the blockchain
         </div>
       )}
     </div>
