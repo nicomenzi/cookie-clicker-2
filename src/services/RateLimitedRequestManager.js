@@ -1,13 +1,14 @@
 // src/services/RateLimitedRequestManager.js
-// Optimized with better caching and request batching
 
 /**
- * A strict rate-limited request manager specifically for Alchemy API
- * Optimized to reduce the number of requests
+ * A rate-limited request manager that prioritizes transactions
+ * and manages RPC fallbacks to ensure successful transactions.
+ * Optimized for both Alchemy and public RPC endpoints.
  */
 class RateLimitedRequestManager {
     constructor() {
-      // Request queue with priorities
+      // Prioritized queues
+      this.transactionQueue = []; // Highest priority - for actual transactions
       this.highPriorityQueue = [];
       this.normalPriorityQueue = [];
       this.lowPriorityQueue = [];
@@ -16,27 +17,32 @@ class RateLimitedRequestManager {
       this.isProcessing = false;
       this.processingTimer = null;
       
-      // Rate limit settings - more conservative
-      this.requestTimeWindow = 1000; // 1 second window
-      this.maxRequestsPerWindow = 5; // Much more conservative (was 9)
-      this.requestTimestamps = [];
+      // Rate limit settings for different providers
+      this.rateLimits = {
+        alchemy: {
+          requestTimeWindow: 1000, // 1 second window
+          maxRequestsPerWindow: 10, // 10 req/sec for Alchemy
+          requestTimestamps: []
+        },
+        public: {
+          requestTimeWindow: 1000, // 1 second window
+          maxRequestsPerWindow: 8, // 8 req/sec for public RPC
+          requestTimestamps: []
+        }
+      };
       
-      // Cache for read operations - enhanced
+      // Current provider
+      this.currentProvider = 'alchemy';
+      
+      // Cache for read operations
       this.cache = new Map();
       this.cacheTTL = new Map();
       
-      // Batch similar requests
-      this.pendingBatches = new Map();
-      this.batchTimeouts = new Map();
-      
-      // Default cache TTL settings - LONGER CACHING
+      // Default cache TTL settings
       this.defaultTTLs = {
-        'player-score': 30000,      // Player score: 30 seconds (was 10s)
-        'balance': 60000,           // Balance: 1 minute (was 10s)
-        'token-balance': 120000,    // Token balance: 2 minutes (was 20s)
-        'redeemable-tokens': 60000, // Redeemable tokens: 1 minute (was 10s)
-        'contract-config': 300000,  // Contract configuration: 5 minutes (was 60s)
-        'transaction-history': 120000 // Transaction history: 2 minutes (was 30s)
+        'balance': 30000,         // Balance: 30 seconds
+        'token-balance': 60000,   // Token balance: 1 minute
+        'contract-config': 300000 // Contract configuration: 5 minutes
       };
       
       // Error tracking
@@ -47,7 +53,7 @@ class RateLimitedRequestManager {
       // Start the processing loop
       this.startProcessing();
       
-      // Setup visibility change handler to pause processing when tab is hidden
+      // Setup visibility handler to pause processing when tab is hidden
       this.setupVisibilityHandler();
     }
     
@@ -103,10 +109,10 @@ class RateLimitedRequestManager {
         }
         
         this.processNextRequest();
-        this.processingTimer = setTimeout(processLoop, 200); // Check queue every 200ms
+        this.processingTimer = setTimeout(processLoop, 100); // Check queue every 100ms
       };
       
-      this.processingTimer = setTimeout(processLoop, 200);
+      this.processingTimer = setTimeout(processLoop, 100);
     }
     
     /**
@@ -121,37 +127,44 @@ class RateLimitedRequestManager {
     
     /**
      * Check if we can make a request based on rate limits
+     * @param {string} provider - The provider to check
      * @returns {boolean} True if we can make a request
      */
-    canMakeRequest() {
+    canMakeRequest(provider = this.currentProvider) {
       const now = Date.now();
+      const limits = this.rateLimits[provider];
       
       // Clean up old request timestamps
-      this.requestTimestamps = this.requestTimestamps.filter(time => now - time < this.requestTimeWindow);
+      limits.requestTimestamps = limits.requestTimestamps.filter(
+        time => now - time < limits.requestTimeWindow
+      );
       
       // Check if we have capacity
-      return this.requestTimestamps.length < this.maxRequestsPerWindow;
+      return limits.requestTimestamps.length < limits.maxRequestsPerWindow;
     }
     
     /**
      * Record that a request was made
+     * @param {string} provider - The provider that was used
      */
-    recordRequest() {
-      this.requestTimestamps.push(Date.now());
+    recordRequest(provider = this.currentProvider) {
+      this.rateLimits[provider].requestTimestamps.push(Date.now());
     }
     
     /**
      * Calculate time to wait before next request
+     * @param {string} provider - The provider to check
      * @returns {number} Milliseconds to wait
      */
-    getTimeToWait() {
-      if (this.canMakeRequest()) {
+    getTimeToWait(provider = this.currentProvider) {
+      if (this.canMakeRequest(provider)) {
         return 0;
       }
       
       const now = Date.now();
-      const oldestRequest = this.requestTimestamps[0];
-      return this.requestTimeWindow - (now - oldestRequest) + 100; // Add 100ms buffer
+      const limits = this.rateLimits[provider];
+      const oldestRequest = limits.requestTimestamps[0];
+      return limits.requestTimeWindow - (now - oldestRequest) + 50; // Add 50ms buffer
     }
     
     /**
@@ -177,6 +190,19 @@ class RateLimitedRequestManager {
     }
     
     /**
+     * Switch provider if current one is rate limited
+     */
+    switchProviderIfNeeded() {
+      if (!this.canMakeRequest(this.currentProvider)) {
+        const alternative = this.currentProvider === 'alchemy' ? 'public' : 'alchemy';
+        if (this.canMakeRequest(alternative)) {
+          console.log(`Switching from ${this.currentProvider} to ${alternative} due to rate limits`);
+          this.currentProvider = alternative;
+        }
+      }
+    }
+    
+    /**
      * Record an error and update backoff time
      * @param {Error} error - The error that occurred
      */
@@ -184,19 +210,21 @@ class RateLimitedRequestManager {
       this.errorCount++;
       this.lastErrorTime = Date.now();
       
-      // Check if it's a rate limit error specifically
+      // Check if it's a rate limit error
       const isRateLimit = error?.message?.includes('429') || 
                         error?.message?.includes('rate limit') || 
                         error?.message?.includes('requests limited');
                         
-      // For rate limit errors, use a more aggressive backoff
+      // For rate limit errors, switch providers
       if (isRateLimit) {
-        // Reduce max requests per window
-        this.maxRequestsPerWindow = Math.max(2, this.maxRequestsPerWindow - 1);
-        console.warn(`Rate limit hit! Reducing to ${this.maxRequestsPerWindow} req/sec`);
+        console.warn(`Rate limit hit on ${this.currentProvider}!`);
         
-        // Use a longer backoff
-        this.backoffTime = Math.min(60000, Math.pow(2, Math.min(6, this.errorCount)) * 1000);
+        // Switch providers for rate limits
+        const alternative = this.currentProvider === 'alchemy' ? 'public' : 'alchemy';
+        this.currentProvider = alternative;
+        
+        // Use a more modest backoff for rate limits since we switched providers
+        this.backoffTime = Math.min(5000, this.backoffTime * 1.5);
       } else {
         // Increase backoff time (max 30 seconds) for other errors
         this.backoffTime = Math.min(30000, Math.pow(2, Math.min(4, this.errorCount)) * 1000);
@@ -220,6 +248,17 @@ class RateLimitedRequestManager {
       const nextRequest = this.getNextRequest();
       if (!nextRequest) return;
       
+      // For transaction requests, always try to send them regardless of rate limits
+      if (nextRequest.isTransaction) {
+        // Try both providers if needed for transactions
+        this.processTransactionRequest(nextRequest);
+        return;
+      }
+      
+      // For regular requests, respect rate limits
+      // Switch provider if current one is rate limited
+      this.switchProviderIfNeeded();
+      
       // Check rate limits
       if (!this.canMakeRequest()) {
         const timeToWait = this.getTimeToWait();
@@ -240,36 +279,30 @@ class RateLimitedRequestManager {
         // Cache if requested
         if (nextRequest.cacheKey) {
           this.cache.set(nextRequest.cacheKey, result);
-          const ttl = nextRequest.cacheTTL || this.getDefaultTTL(nextRequest.cacheKey);
-          this.cacheTTL.set(nextRequest.cacheKey, Date.now() + ttl);
+          this.cacheTTL.set(
+            nextRequest.cacheKey,
+            Date.now() + (nextRequest.cacheTTL || this.getDefaultTTL(nextRequest.cacheKey))
+          );
         }
         
         // Resolve the promise
         nextRequest.resolve(result);
-        
-        // Successful request - we can gradually increase allowed rate if needed
-        if (this.maxRequestsPerWindow < 5 && this.errorCount === 0) {
-          // Very slowly increase the rate limit
-          this.maxRequestsPerWindow = Math.min(5, this.maxRequestsPerWindow + 0.1);
-        }
       } catch (error) {
         console.error('Request error:', error);
         
         // Record error for backoff
         this.recordError(error);
         
-        // Check if it's a rate limit or other RPC error
-        const isRateLimit = error?.message?.includes('429') || 
-                          error?.message?.includes('rate limit') || 
-                          error?.message?.includes('requests limited');
-        
-        if (isRateLimit) {
-          console.warn('Rate limit hit, backing off...');
+        // Handle rate limit errors
+        if (error?.message?.includes('429') || 
+            error?.message?.includes('rate limit') ||
+            error?.message?.includes('requests limited')) {
           
-          // Add back to queue if retries remain
+          // Requeue with alternate provider if retries remain
           if (nextRequest.retries < nextRequest.maxRetries) {
             nextRequest.retries++;
-            const backoffTime = Math.pow(2, nextRequest.retries) * 1000;
+            // Use exponential backoff
+            const backoffTime = Math.pow(1.5, nextRequest.retries) * 1000;
             
             setTimeout(() => {
               this.addToQueue(nextRequest);
@@ -287,17 +320,69 @@ class RateLimitedRequestManager {
     }
     
     /**
+     * Process a transaction request - with special handling to ensure it goes through
+     * @param {Object} request - The transaction request
+     */
+    async processTransactionRequest(request) {
+      this.isProcessing = true;
+      
+      try {
+        // First try with current provider
+        this.recordRequest();
+        const result = await request.fn();
+        request.resolve(result);
+      } catch (error) {
+        console.error('Transaction error:', error);
+        
+        // Check if it's a rate limit error
+        if (error?.message?.includes('429') || 
+            error?.message?.includes('rate limit') ||
+            error?.message?.includes('requests limited')) {
+          
+          // Switch provider
+          const alternative = this.currentProvider === 'alchemy' ? 'public' : 'alchemy';
+          this.currentProvider = alternative;
+          console.log(`Transaction failed on provider, switching to ${alternative}`);
+          
+          try {
+            // Retry with alternative provider - this is important for transactions
+            this.recordRequest(alternative);
+            const result = await request.altFn ? request.altFn() : request.fn();
+            request.resolve(result);
+          } catch (altError) {
+            // Both providers failed
+            console.error('Both providers failed for transaction:', altError);
+            request.reject(altError);
+          }
+        } else {
+          // Not a rate limit error, just reject
+          request.reject(error);
+        }
+      } finally {
+        this.isProcessing = false;
+      }
+    }
+    
+    /**
      * Get the next request from queues based on priority
      */
     getNextRequest() {
+      // Transactions are highest priority
+      if (this.transactionQueue.length > 0) {
+        return this.transactionQueue.shift();
+      }
+      
+      // Then high priority items
       if (this.highPriorityQueue.length > 0) {
         return this.highPriorityQueue.shift();
       }
       
+      // Then normal priority
       if (this.normalPriorityQueue.length > 0) {
         return this.normalPriorityQueue.shift();
       }
       
+      // Finally low priority
       if (this.lowPriorityQueue.length > 0) {
         return this.lowPriorityQueue.shift();
       }
@@ -310,6 +395,11 @@ class RateLimitedRequestManager {
      * @param {Object} request - The request object
      */
     addToQueue(request) {
+      if (request.isTransaction) {
+        this.transactionQueue.push(request);
+        return;
+      }
+      
       switch (request.priority) {
         case 'high':
           this.highPriorityQueue.push(request);
@@ -333,17 +423,7 @@ class RateLimitedRequestManager {
           return ttl;
         }
       }
-      return 60000; // Default 1 minute TTL (was 10s)
-    }
-    
-    /**
-     * Create a batch key from request parameters
-     * @param {string} prefix - The batch prefix
-     * @param {Object} params - The parameters
-     * @returns {string} - The batch key
-     */
-    getBatchKey(prefix, params) {
-      return `${prefix}:${JSON.stringify(params)}`;
+      return 60000; // Default 1 minute TTL
     }
     
     /**
@@ -357,8 +437,6 @@ class RateLimitedRequestManager {
     request(requestFn, cacheKey = null, cacheTTL = null, options = {}) {
       const priority = options.priority || 'normal';
       const maxRetries = options.maxRetries !== undefined ? options.maxRetries : 3;
-      const batchKey = options.batchKey || null;
-      const batchParams = options.batchParams || null;
       
       // Check cache first
       if (cacheKey && this.cache.has(cacheKey)) {
@@ -372,60 +450,15 @@ class RateLimitedRequestManager {
         }
       }
       
-      // If this is a batchable request, check for an existing batch
-      if (batchKey && batchParams) {
-        const fullBatchKey = this.getBatchKey(batchKey, batchParams);
-        
-        if (this.pendingBatches.has(fullBatchKey)) {
-          // Add to existing batch
-          return new Promise((resolve, reject) => {
-            this.pendingBatches.get(fullBatchKey).push({ resolve, reject });
-          });
-        } else {
-          // Create a new batch
-          this.pendingBatches.set(fullBatchKey, []);
-          
-          // Setup timeout to execute batch
-          const timeoutId = setTimeout(() => {
-            const batch = this.pendingBatches.get(fullBatchKey);
-            this.pendingBatches.delete(fullBatchKey);
-            this.batchTimeouts.delete(fullBatchKey);
-            
-            // Execute the batch request
-            requestFn()
-              .then(result => {
-                // Cache the result
-                if (cacheKey) {
-                  this.cache.set(cacheKey, result);
-                  const ttl = cacheTTL || this.getDefaultTTL(cacheKey);
-                  this.cacheTTL.set(cacheKey, Date.now() + ttl);
-                }
-                
-                // Resolve all promises in the batch
-                batch.forEach(({ resolve }) => resolve(result));
-              })
-              .catch(error => {
-                // Reject all promises in the batch
-                batch.forEach(({ reject }) => reject(error));
-              });
-          }, 20); // Short delay to allow batching
-          
-          this.batchTimeouts.set(fullBatchKey, timeoutId);
-        }
-        
-        // Return promise for the current request
-        return new Promise((resolve, reject) => {
-          this.pendingBatches.get(fullBatchKey).push({ resolve, reject });
-        });
-      }
-      
-      // Create a new promise for non-batchable requests
+      // Create a new promise
       return new Promise((resolve, reject) => {
         const request = {
           fn: requestFn,
+          altFn: options.altFn, // Alternative function to call with different provider
           cacheKey,
           cacheTTL,
           priority,
+          isTransaction: options.isTransaction || false,
           resolve,
           reject,
           retries: 0,
@@ -435,6 +468,44 @@ class RateLimitedRequestManager {
         
         this.addToQueue(request);
       });
+    }
+    
+    /**
+     * Make a transaction request with special high-priority handling
+     * @param {Function} txFn - Function that sends the transaction
+     * @param {Function} altFn - Alternative function to try if first fails
+     * @returns {Promise} - The transaction result
+     */
+    sendTransaction(txFn, altFn = null) {
+      return this.request(txFn, null, null, {
+        priority: 'high',
+        isTransaction: true,
+        altFn: altFn,
+        maxRetries: 2
+      });
+    }
+    
+    /**
+     * Check if a key exists in cache and is not expired
+     * @param {string} cacheKey - The cache key to check
+     * @returns {boolean} - True if the key exists and is not expired
+     */
+    hasInCache(cacheKey) {
+      if (!this.cache.has(cacheKey)) return false;
+      const expiry = this.cacheTTL.get(cacheKey);
+      return expiry > Date.now();
+    }
+    
+    /**
+     * Get a value from cache
+     * @param {string} cacheKey - The cache key to get
+     * @returns {any} - The cached value or null if not found
+     */
+    getFromCache(cacheKey) {
+      if (this.hasInCache(cacheKey)) {
+        return this.cache.get(cacheKey);
+      }
+      return null;
     }
     
     /**
@@ -469,88 +540,22 @@ class RateLimitedRequestManager {
     }
     
     /**
-     * Update rate limit settings
-     * @param {Object} settings - New settings
+     * Clear all cache keys matching a pattern
+     * @param {string} pattern - The pattern to match
      */
-    updateSettings(settings) {
-      if (settings.maxRequestsPerWindow) {
-        this.maxRequestsPerWindow = settings.maxRequestsPerWindow;
-      }
+    clearCachePattern(pattern) {
+      if (!pattern) return;
       
-      if (settings.requestTimeWindow) {
-        this.requestTimeWindow = settings.requestTimeWindow;
-      }
-      
-      if (settings.cacheTTLs) {
-        this.defaultTTLs = { ...this.defaultTTLs, ...settings.cacheTTLs };
-      }
-    }
-    
-    /**
-     * Get current queue and cache stats
-     * @returns {Object} - Queue statistics
-     */
-    getStats() {
-      return {
-        highPriorityQueueLength: this.highPriorityQueue.length,
-        normalPriorityQueueLength: this.normalPriorityQueue.length,
-        lowPriorityQueueLength: this.lowPriorityQueue.length,
-        currentRate: this.maxRequestsPerWindow,
-        backoffTime: this.backoffTime,
-        errorCount: this.errorCount,
-        isProcessing: this.isProcessing,
-        currentRequestCount: this.requestTimestamps.length,
-        cacheSize: this.cache.size,
-        pendingBatches: this.pendingBatches.size
-      };
-    }
-    // Add these missing helper methods to RateLimitedRequestManager.js class
-
-/**
- * Check if a key exists in cache and is not expired
- * @param {string} cacheKey - The cache key to check
- * @returns {boolean} - True if the key exists and is not expired
- */
-hasInCache(cacheKey) {
-    if (!this.cache.has(cacheKey)) return false;
-    const expiry = this.cacheTTL.get(cacheKey);
-    return expiry > Date.now();
-  }
-  
-  /**
-   * Get a value from cache
-   * @param {string} cacheKey - The cache key to get
-   * @returns {any} - The cached value or null if not found
-   */
-  getFromCache(cacheKey) {
-    if (this.hasInCache(cacheKey)) {
-      return this.cache.get(cacheKey);
-    }
-    return null;
-  }
-  
-  /**
-   * Clear all cache keys matching a pattern
-   * @param {string} pattern - The pattern to match
-   */
-  clearCachePattern(pattern) {
-    if (!pattern) return;
-    
-    // Find all keys that match the pattern
-    for (const key of this.cache.keys()) {
-      if (key.includes(pattern)) {
-        this.cache.delete(key);
-        this.cacheTTL.delete(key);
+      // Find all keys that match the pattern
+      for (const key of this.cache.keys()) {
+        if (key.includes(pattern)) {
+          this.cache.delete(key);
+          this.cacheTTL.delete(key);
+        }
       }
     }
   }
-
-
-
-  }
   
-  // Create a singleton instance
+  // Create singleton instance
   const rateLimitedManager = new RateLimitedRequestManager();
   export default rateLimitedManager;
-
-  

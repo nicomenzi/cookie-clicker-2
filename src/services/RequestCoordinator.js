@@ -1,6 +1,7 @@
 // src/services/RequestCoordinator.js
 /**
- * Global coordinator for API requests to drastically reduce background fetching
+ * Global coordinator for API requests to dramatically reduce background fetching
+ * while still ensuring transactions go through immediately
  */
 class RequestCoordinator {
     constructor() {
@@ -9,12 +10,12 @@ class RequestCoordinator {
       
       // Default refresh intervals (very long to minimize requests)
       this.refreshIntervals = {
-        playerScore: 1 * 60 * 1000,       // 1 minute
-        redeemableTokens: 3 * 60 * 1000,  // 3 minutes
-        cookieBalance: 2 * 60 * 1000,     // 2 minutes
+        playerScore: 2 * 60 * 1000,      // 2 minutes
+        redeemableTokens: 5 * 60 * 1000, // 5 minutes
+        cookieBalance: 3 * 60 * 1000,    // 3 minutes
         contractHasTokens: 5 * 60 * 1000, // 5 minutes
-        clicksPerToken: 15 * 60 * 1000,   // 15 minutes
-        transactionHistory: 2 * 60 * 1000 // 2 minutes
+        clicksPerToken: 15 * 60 * 1000,  // 15 minutes
+        transactionHistory: 3 * 60 * 1000 // 3 minutes
       };
       
       // Cache for data
@@ -24,6 +25,9 @@ class RequestCoordinator {
       this.lastUserAction = Date.now();
       this.isUserActive = true;
       
+      // Track if app is in background
+      this.isInBackground = false;
+      
       // Register user activity events
       if (typeof window !== 'undefined') {
         ['mousedown', 'keydown', 'touchstart', 'click'].forEach(event => {
@@ -32,6 +36,11 @@ class RequestCoordinator {
         
         // Check for inactivity every minute
         setInterval(() => this.checkInactivity(), 60000);
+        
+        // Track visibility
+        document.addEventListener('visibilitychange', () => {
+          this.isInBackground = document.visibilityState === 'hidden';
+        });
       }
     }
     
@@ -55,6 +64,34 @@ class RequestCoordinator {
     }
     
     /**
+     * Set an ultra-minimal refresh interval (for faster development testing)
+     * @param {boolean} minimal - Whether to use minimal refresh intervals
+     */
+    setMinimalMode(minimal) {
+      if (minimal) {
+        // Ultra-minimal refresh for testing (only refresh tokens when user acts)
+        this.refreshIntervals = {
+          playerScore: 5 * 60 * 1000,       // 5 minutes
+          redeemableTokens: 10 * 60 * 1000, // 10 minutes
+          cookieBalance: 5 * 60 * 1000,     // 5 minutes
+          contractHasTokens: 10 * 60 * 1000, // 10 minutes
+          clicksPerToken: 30 * 60 * 1000,   // 30 minutes
+          transactionHistory: 5 * 60 * 1000 // 5 minutes
+        };
+      } else {
+        // Reset to normal intervals
+        this.refreshIntervals = {
+          playerScore: 2 * 60 * 1000,      // 2 minutes
+          redeemableTokens: 5 * 60 * 1000, // 5 minutes
+          cookieBalance: 3 * 60 * 1000,    // 3 minutes
+          contractHasTokens: 5 * 60 * 1000, // 5 minutes
+          clicksPerToken: 15 * 60 * 1000,  // 15 minutes
+          transactionHistory: 3 * 60 * 1000 // 3 minutes
+        };
+      }
+    }
+    
+    /**
      * Check if a data type should be refreshed
      * @param {string} dataType - The data type to check
      * @param {boolean} [forceRefresh=false] - Force a refresh regardless of time
@@ -65,7 +102,7 @@ class RequestCoordinator {
       if (forceRefresh) return true;
       
       // When page is hidden, block almost all requests
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      if (this.isInBackground) {
         return false;
       }
       
@@ -145,4 +182,8 @@ class RequestCoordinator {
   
   // Create singleton instance
   const requestCoordinator = new RequestCoordinator();
+  
+  // Start in minimal mode to dramatically reduce API calls
+  requestCoordinator.setMinimalMode(true);
+  
   export default requestCoordinator;

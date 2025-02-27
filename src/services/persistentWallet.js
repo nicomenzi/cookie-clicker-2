@@ -13,35 +13,8 @@ export class PersistentMonadGasWallet {
     this.balance = ethers.BigNumber.from(0);
     this.currentNonce = null;
     this.pendingTxCount = 0;
-    // Safe upper limit to avoid too many pending transactions
-    this.maxPendingTx = 25;
-    
-    // Create a backup Alchemy provider for redundancy
-    this.alchemyProvider = null;
-    this.useAlchemyFallback = false;
-    this.initAlchemyProvider();
-  }
-  
-  /**
-   * Initialize the Alchemy provider as fallback
-   */
-  initAlchemyProvider() {
-    try {
-      this.alchemyProvider = new ethers.providers.JsonRpcProvider(MONAD_TESTNET.rpcUrls[0]);
-    } catch (error) {
-      console.error("Failed to initialize Alchemy fallback provider:", error);
-    }
-  }
-  
-  /**
-   * Get the best provider to use
-   * @returns {ethers.providers.Provider} - The provider to use
-   */
-  getProvider() {
-    if (this.useAlchemyFallback && this.alchemyProvider) {
-      return this.alchemyProvider;
-    }
-    return this.provider;
+    // Increased to allow 50 pending transactions
+    this.maxPendingTx = 50;
   }
 
   /**
@@ -75,7 +48,7 @@ export class PersistentMonadGasWallet {
       }
       
       // Create wallet from this deterministic private key
-      this.wallet = new ethers.Wallet(ethers.utils.arrayify(derivedKey)).connect(this.getProvider());
+      this.wallet = new ethers.Wallet(ethers.utils.arrayify(derivedKey)).connect(this.provider);
       
       // Initialize the nonce
       await this.refreshNonce();
@@ -102,7 +75,7 @@ export class PersistentMonadGasWallet {
     
     try {
       this._lastBalanceCheck = now;
-      this.balance = await this.getProvider().getBalance(this.wallet.address);
+      this.balance = await this.provider.getBalance(this.wallet.address);
       
       // Check if balance is very low or zero and warn
       if (this.balance.lte(ethers.utils.parseEther("0.001"))) {
@@ -112,19 +85,6 @@ export class PersistentMonadGasWallet {
       return this.balance;
     } catch (error) {
       console.error("Error getting wallet balance:", error);
-      
-      // Try the alternate provider if main one fails
-      if (!this.useAlchemyFallback && this.alchemyProvider) {
-        try {
-          this.useAlchemyFallback = true;
-          this.balance = await this.alchemyProvider.getBalance(this.wallet.address);
-          return this.balance;
-        } catch (fallbackError) {
-          console.error("Fallback provider also failed:", fallbackError);
-          this.useAlchemyFallback = false;
-        }
-      }
-      
       // Return last known balance on error to prevent cascading failures
       return this.balance;
     }
@@ -137,27 +97,12 @@ export class PersistentMonadGasWallet {
     if (!this.wallet) throw new Error("Wallet not initialized");
     
     try {
-      this.currentNonce = await this.getProvider().getTransactionCount(this.wallet.address);
+      this.currentNonce = await this.provider.getTransactionCount(this.wallet.address);
       this.pendingTxCount = 0; // Reset pending transaction count
       return this.currentNonce;
     } catch (error) {
       console.error("Error refreshing nonce:", error);
-      
-      // Try alternate provider if main one fails
-      if (!this.useAlchemyFallback && this.alchemyProvider) {
-        try {
-          this.useAlchemyFallback = true;
-          this.currentNonce = await this.alchemyProvider.getTransactionCount(this.wallet.address);
-          this.pendingTxCount = 0;
-          return this.currentNonce;
-        } catch (fallbackError) {
-          console.error("Fallback provider also failed for nonce:", fallbackError);
-          this.useAlchemyFallback = false;
-          throw new Error("Failed to refresh nonce with all providers");
-        }
-      } else {
-        throw new Error("Failed to refresh nonce: " + (error.message || "Unknown error"));
-      }
+      throw new Error("Failed to refresh nonce: " + (error.message || "Unknown error"));
     }
   }
 
@@ -168,27 +113,12 @@ export class PersistentMonadGasWallet {
    */
   async estimateGas(tx) {
     try {
-      return await this.getProvider().estimateGas({
+      return await this.provider.estimateGas({
         ...tx,
         from: this.wallet.address
       });
     } catch (error) {
       console.error("Gas estimation failed:", error);
-      
-      // Try alternate provider if main one fails
-      if (!this.useAlchemyFallback && this.alchemyProvider) {
-        try {
-          this.useAlchemyFallback = true;
-          return await this.alchemyProvider.estimateGas({
-            ...tx,
-            from: this.wallet.address
-          });
-        } catch (fallbackError) {
-          console.error("Fallback provider also failed for gas estimation:", fallbackError);
-          this.useAlchemyFallback = false;
-        }
-      }
-      
       throw new Error("Failed to estimate gas: " + error.message);
     }
   }
@@ -216,19 +146,15 @@ export class PersistentMonadGasWallet {
         await this.refreshNonce();
       }
       
-      // Use the current provider for gas price
-      const currentProvider = this.getProvider();
-      
       // Use a cached gas price that updates only every 10 seconds
       let adjustedGasPrice;
       if (!this._cachedGasPrice || !this._lastGasPriceCheck || (Date.now() - this._lastGasPriceCheck) > 10000) {
         try {
-          const gasPrice = await currentProvider.getGasPrice();
+          const gasPrice = await this.provider.getGasPrice();
           adjustedGasPrice = gasPrice.mul(110).div(100);
           this._cachedGasPrice = adjustedGasPrice;
           this._lastGasPriceCheck = Date.now();
         } catch (error) {
-          console.error("Error getting gas price:", error);
           // If gas price fetch fails, use last known or default
           adjustedGasPrice = this._cachedGasPrice || ethers.utils.parseUnits("1", "gwei");
         }
@@ -247,46 +173,22 @@ export class PersistentMonadGasWallet {
       this.currentNonce++;
       this.pendingTxCount++;
       
-      // Make sure wallet is connected to current provider
-      if (this.wallet.provider !== currentProvider) {
-        // Create a new wallet instance with the same key but different provider
-        const connectedWallet = new ethers.Wallet(this.wallet.privateKey, currentProvider);
-        const response = await connectedWallet.sendTransaction(txWithNonce);
-        
-        // Setup automatic nonce reset on failure
-        this.setupTransactionWatcher(response);
-        return response;
-      } else {
-        // Sign and send the transaction using the gas wallet
-        const response = await this.wallet.sendTransaction(txWithNonce);
-        
-        // Setup automatic nonce reset on failure
-        this.setupTransactionWatcher(response);
-        return response;
-      }
-    } catch (error) {
-      console.error("Transaction error:", error);
+      // Sign and send the transaction using the gas wallet
+      const response = await this.wallet.sendTransaction(txWithNonce);
       
+      // Setup automatic nonce reset on failure
+      this.setupTransactionWatcher(response);
+      
+      return response;
+    } catch (error) {
       // Handle specific errors
       if (error.message && error.message.includes("nonce")) {
         await this.refreshNonce();
         throw new Error("Transaction nonce error. Please try again.");
       }
       
-      // Handle rate limit errors
-      if (error.message && (
-        error.message.includes('429') || 
-        error.message.includes('rate limit') ||
-        error.message.includes('requests limited')
-      )) {
-        // Try to switch providers
-        if (!this.useAlchemyFallback && this.alchemyProvider) {
-          this.useAlchemyFallback = !this.useAlchemyFallback;
-          console.warn("Switching to alternative provider due to rate limit");
-        }
-        
-        throw new Error("Transaction failed due to API rate limits. Please try again.");
-      }
+      // Decreased count for failed transactions
+      this.pendingTxCount = Math.max(0, this.pendingTxCount - 1);
       
       throw error;
     }
@@ -304,10 +206,10 @@ export class PersistentMonadGasWallet {
       .catch(async (error) => {
         console.error("Transaction failed:", error);
         // Reset nonce on serious errors
-        if (error.message && 
-           (error.message.includes("nonce") || 
-            error.message.includes("replacement transaction underpriced") ||
-            error.message.includes("already known"))) {
+        if (error.message && (
+          error.message.includes("nonce") || 
+          error.message.includes("replacement transaction underpriced") ||
+          error.message.includes("already known"))) {
           await this.refreshNonce();
         } else {
           this.pendingTxCount = Math.max(0, this.pendingTxCount - 1);
