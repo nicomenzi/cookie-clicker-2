@@ -14,6 +14,11 @@ let clickerContract = null;
 let tokenContract = null;
 let contractDecimals = null;
 
+// Force using Alchemy for non-wallet operations
+const getAlchemyProvider = () => {
+  return new ethers.providers.JsonRpcProvider(MONAD_TESTNET.rpcUrls[0]);
+};
+
 /**
  * Connect to browser wallet (MetaMask, etc.) with enhanced security
  * @returns {Promise<{provider: ethers.providers.Web3Provider, signer: ethers.Signer, address: string}>}
@@ -67,9 +72,11 @@ export const connectWallet = async () => {
  */
 export const getCookieClickerContract = (signerOrProvider) => {
   if (!signerOrProvider) {
-    throw new Error("Provider or signer is required");
+    // Use Alchemy provider as fallback if no provider specified
+    signerOrProvider = getAlchemyProvider();
   }
   
+  // Reset contract when provider changes
   if (!clickerContract || clickerContract.provider !== signerOrProvider) {
     clickerContract = new ethers.Contract(
       COOKIE_CLICKER_ADDRESS,
@@ -88,9 +95,11 @@ export const getCookieClickerContract = (signerOrProvider) => {
  */
 export const getCookieTokenContract = (signerOrProvider) => {
   if (!signerOrProvider) {
-    throw new Error("Provider or signer is required");
+    // Use Alchemy provider as fallback if no provider specified
+    signerOrProvider = getAlchemyProvider();
   }
   
+  // Reset contract when provider changes
   if (!tokenContract || tokenContract.provider !== signerOrProvider) {
     tokenContract = new ethers.Contract(
       COOKIE_TOKEN_ADDRESS,
@@ -110,6 +119,10 @@ export const getCookieTokenContract = (signerOrProvider) => {
 export const getTokenDecimals = async (provider) => {
   if (contractDecimals !== null) {
     return contractDecimals;
+  }
+  
+  if (!provider) {
+    provider = getAlchemyProvider();
   }
   
   return rateLimitedManager.request(
@@ -132,7 +145,7 @@ export const getTokenDecimals = async (provider) => {
  */
 export const checkContractHasTokens = async (provider) => {
   if (!provider) {
-    throw new Error("Provider is required");
+    provider = getAlchemyProvider();
   }
   
   return rateLimitedManager.request(
@@ -157,8 +170,12 @@ export const checkContractHasTokens = async (provider) => {
  * @returns {Promise<number>} - Player's score
  */
 export const getPlayerScore = async (provider, address) => {
-  if (!provider || !address) {
-    throw new Error("Provider and address are required");
+  if (!provider) {
+    provider = getAlchemyProvider();
+  }
+  
+  if (!address) {
+    throw new Error("Address is required");
   }
   
   return rateLimitedManager.request(
@@ -183,7 +200,7 @@ export const getPlayerScore = async (provider, address) => {
  */
 export const getClicksPerToken = async (provider) => {
   if (!provider) {
-    throw new Error("Provider is required");
+    provider = getAlchemyProvider();
   }
   
   return rateLimitedManager.request(
@@ -208,8 +225,12 @@ export const getClicksPerToken = async (provider) => {
  * @returns {Promise<string>} - Redeemable tokens (formatted)
  */
 export const getRedeemableTokens = async (provider, address) => {
-  if (!provider || !address) {
-    throw new Error("Provider and address are required");
+  if (!provider) {
+    provider = getAlchemyProvider();
+  }
+  
+  if (!address) {
+    throw new Error("Address is required");
   }
   
   return rateLimitedManager.request(
@@ -234,8 +255,12 @@ export const getRedeemableTokens = async (provider, address) => {
  * @returns {Promise<string>} - Formatted token balance
  */
 export const getTokenBalance = async (provider, address) => {
-  if (!provider || !address) {
-    throw new Error("Provider and address are required");
+  if (!provider) {
+    provider = getAlchemyProvider();
+  }
+  
+  if (!address) {
+    throw new Error("Address is required");
   }
   
   return rateLimitedManager.request(
@@ -296,8 +321,12 @@ export const recordClick = async (gasWallet) => {
     }
     
     // Special handling for rate limit errors
-    if (error.message && error.message.includes('429')) {
-      throw new Error("Alchemy API rate limit hit. Request will be queued and retried automatically.");
+    if (error.message && (
+      error.message.includes('429') || 
+      error.message.includes('rate limit') ||
+      error.message.includes('requests limited')
+    )) {
+      throw new Error("API rate limit hit. Request will be queued and retried automatically.");
     }
     
     throw new Error("Failed to record click: " + (error.message || "Unknown error"));
@@ -351,6 +380,15 @@ export const redeemCookies = async (gasWallet, amount = 0) => {
       error.message.includes("Signer had insufficient balance")
     )) {
       throw new Error("Your gas wallet needs more MON! Please fund it using the 'Fund' button.");
+    }
+    
+    // Special handling for rate limit errors
+    if (error.message && (
+      error.message.includes('429') || 
+      error.message.includes('rate limit') ||
+      error.message.includes('requests limited')
+    )) {
+      throw new Error("API rate limit hit. Request will be queued and retried automatically.");
     }
     
     throw new Error("Failed to redeem cookies: " + (error.message || "Unknown error"));
@@ -418,8 +456,12 @@ export const fundClickerContract = async (signer, amount) => {
  * @returns {Promise<Array>} - Array of transactions
  */
 export const fetchTransactionsFromBlockchain = async (provider, walletAddress, blockCount = 100) => {
-  if (!provider || !walletAddress) {
-    throw new Error("Provider and wallet address are required");
+  if (!provider) {
+    provider = getAlchemyProvider();
+  }
+  
+  if (!walletAddress) {
+    throw new Error("Wallet address is required");
   }
   
   return rateLimitedManager.request(

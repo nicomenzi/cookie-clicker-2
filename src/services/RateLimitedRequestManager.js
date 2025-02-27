@@ -1,8 +1,8 @@
 // src/services/RateLimitedRequestManager.js
 
 /**
- * A strict rate-limited request manager specifically for Monad's API rate limits
- * Optimized for Alchemy API requests
+ * A strict rate-limited request manager specifically for Alchemy API
+ * Updated to handle potential rate limits more effectively
  */
 class RateLimitedRequestManager {
     constructor() {
@@ -15,9 +15,9 @@ class RateLimitedRequestManager {
       this.isProcessing = false;
       this.processingTimer = null;
       
-      // Rate limit settings - adjusted for Alchemy API
+      // Rate limit settings for Alchemy API (more conservative to be safe)
       this.requestTimeWindow = 1000; // 1 second window
-      this.maxRequestsPerWindow = 25; // Maximum requests per second (Alchemy-adjusted)
+      this.maxRequestsPerWindow = 9; // Keep under 10 req/sec to be safe
       this.requestTimestamps = [];
       
       // Cache for read operations
@@ -35,6 +35,9 @@ class RateLimitedRequestManager {
       this.errorCount = 0;
       this.lastErrorTime = 0;
       this.backoffTime = 1000; // Start with 1s backoff
+      
+      // Track which RPC is being used
+      this.rpcFailures = new Map();
       
       // Start the processing loop
       this.startProcessing();
@@ -98,7 +101,7 @@ class RateLimitedRequestManager {
       
       const now = Date.now();
       const oldestRequest = this.requestTimestamps[0];
-      return this.requestTimeWindow - (now - oldestRequest) + 50; // Add 50ms buffer
+      return this.requestTimeWindow - (now - oldestRequest) + 100; // Add 100ms buffer
     }
     
     /**
@@ -125,13 +128,26 @@ class RateLimitedRequestManager {
     
     /**
      * Record an error and update backoff time
+     * @param {Error} error - The error that occurred
      */
-    recordError() {
+    recordError(error) {
       this.errorCount++;
       this.lastErrorTime = Date.now();
       
-      // Increase backoff time (max 30 seconds)
-      this.backoffTime = Math.min(30000, Math.pow(2, Math.min(4, this.errorCount)) * 1000);
+      // Check if it's a rate limit error specifically
+      const isRateLimit = error?.message?.includes('429') || 
+                          error?.message?.includes('rate limit') || 
+                          error?.message?.includes('requests limited');
+                          
+      // For rate limit errors, use a more aggressive backoff
+      if (isRateLimit) {
+        this.maxRequestsPerWindow = Math.max(5, this.maxRequestsPerWindow - 1); // Reduce the rate further
+        this.backoffTime = Math.min(60000, Math.pow(2, Math.min(6, this.errorCount)) * 1000);
+        console.warn(`Rate limit hit! Reducing to ${this.maxRequestsPerWindow} req/sec with ${this.backoffTime}ms backoff`);
+      } else {
+        // Increase backoff time (max 30 seconds) for other errors
+        this.backoffTime = Math.min(30000, Math.pow(2, Math.min(4, this.errorCount)) * 1000);
+      }
     }
     
     /**
@@ -179,14 +195,23 @@ class RateLimitedRequestManager {
         
         // Resolve the promise
         nextRequest.resolve(result);
+        
+        // Successful request - we can gradually increase allowed rate if needed
+        if (this.maxRequestsPerWindow < 9 && this.errorCount === 0) {
+          this.maxRequestsPerWindow = Math.min(9, this.maxRequestsPerWindow + 0.2);
+        }
       } catch (error) {
         console.error('Request error:', error);
         
         // Record error for backoff
-        this.recordError();
+        this.recordError(error);
         
-        // Handle rate limit errors
-        if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
+        // Check if it's a rate limit or other RPC error
+        const isRateLimit = error?.message?.includes('429') || 
+                          error?.message?.includes('rate limit') || 
+                          error?.message?.includes('requests limited');
+        
+        if (isRateLimit) {
           console.warn('Rate limit hit, backing off...');
           
           // Add back to queue if retries remain
@@ -344,6 +369,23 @@ class RateLimitedRequestManager {
       if (settings.requestTimeWindow) {
         this.requestTimeWindow = settings.requestTimeWindow;
       }
+    }
+    
+    /**
+     * Get current queue stats
+     * @returns {Object} - Queue statistics
+     */
+    getStats() {
+      return {
+        highPriorityQueueLength: this.highPriorityQueue.length,
+        normalPriorityQueueLength: this.normalPriorityQueue.length,
+        lowPriorityQueueLength: this.lowPriorityQueue.length,
+        currentRate: this.maxRequestsPerWindow,
+        backoffTime: this.backoffTime,
+        errorCount: this.errorCount,
+        isProcessing: this.isProcessing,
+        currentRequestCount: this.requestTimestamps.length
+      };
     }
   }
   

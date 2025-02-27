@@ -1,8 +1,9 @@
-// src/context/WalletContext.jsx
+// src/context/WalletContext.jsx (corrected approach)
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { connectWallet } from '../services/blockchain';
 import { PersistentMonadGasWallet } from '../services/persistentWallet';
+import { MONAD_TESTNET } from '../constants/blockchain'; 
 
 const WalletContext = createContext();
 
@@ -30,18 +31,26 @@ export const WalletProvider = ({ children }) => {
   const connectMainWallet = async () => {
     setLoading(true);
     try {
+      // Get wallet connection from browser
       const { provider, signer, address } = await connectWallet();
       
+      // Create a secondary Alchemy provider for read operations
+      const alchemyProvider = new ethers.providers.JsonRpcProvider(
+        MONAD_TESTNET.rpcUrls[0]
+      );
+      
       // Update main wallet state
+      // - Use original provider/signer for transactions (writing)
+      // - Use Alchemy provider for read operations in other components
       setMainWallet({
         connected: true,
         address,
-        provider,
-        signer,
+        provider: alchemyProvider, // Use Alchemy for high-rate reads
+        signer, // Keep original signer for transactions
       });
       
-      // Initialize gas wallet
-      await initializeGasWallet(provider, address, signer);
+      // Initialize gas wallet with Alchemy provider for better rate limits
+      await initializeGasWallet(alchemyProvider, address, signer);
     } catch (error) {
       console.error("Error connecting wallet:", error);
       throw error;
@@ -148,4 +157,3 @@ export const WalletProvider = ({ children }) => {
     </WalletContext.Provider>
   );
 };
-
