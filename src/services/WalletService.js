@@ -1,19 +1,66 @@
-// src/services/persistentWallet.js
+// src/services/WalletService.js
 import { ethers } from 'ethers';
 import { MONAD_TESTNET } from '../constants/blockchain';
+import apiManager from './ApiManager';
+
+/**
+ * Connect to browser wallet (MetaMask, etc.) with enhanced security
+ * @returns {Promise<{provider: ethers.providers.Web3Provider, signer: ethers.Signer, address: string}>}
+ */
+export const connectWallet = async () => {
+  if (!window.ethereum) {
+    throw new Error("No Ethereum wallet found. Please install MetaMask or similar.");
+  }
+  
+  try {
+    await window.ethereum.request({ method: 'eth_requestAccounts' });
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    
+    // Check if we're on Monad network
+    const network = await provider.getNetwork();
+    if (network.chainId !== parseInt(MONAD_TESTNET.chainId, 16)) {
+      try {
+        await window.ethereum.request({
+          method: 'wallet_switchEthereumChain',
+          params: [{ chainId: MONAD_TESTNET.chainId }],
+        });
+      } catch (switchError) {
+        // This error code means that the chain hasn't been added to MetaMask
+        if (switchError.code === 4902) {
+          await window.ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [MONAD_TESTNET],
+          });
+        } else {
+          throw switchError;
+        }
+      }
+    }
+    
+    // Re-create provider after switching chains to ensure it's using the correct network
+    const updatedProvider = new ethers.providers.Web3Provider(window.ethereum);
+    const signer = updatedProvider.getSigner();
+    const address = await signer.getAddress();
+    
+    return { provider: updatedProvider, signer, address };
+  } catch (error) {
+    console.error("Wallet connection error:", error);
+    throw new Error("Failed to connect wallet: " + (error.message || "Unknown error"));
+  }
+};
 
 /**
  * A wallet that persists across sessions by deriving its private key
- * from a signature from the user's main wallet with enhanced security
+ * from a signature from the user's main wallet
  */
-export class PersistentMonadGasWallet {
+export class PersistentGasWallet {
   constructor(provider) {
     this.provider = provider;
     this.wallet = null;
     this.balance = ethers.BigNumber.from(0);
     this.currentNonce = null;
     this.pendingTxCount = 0;
-    // Increased to allow 50 pending transactions
+    // Maximum pending transactions allowed
     this.maxPendingTx = 50;
   }
 
@@ -107,23 +154,6 @@ export class PersistentMonadGasWallet {
   }
 
   /**
-   * Estimate gas for a transaction
-   * @param {Object} tx - The transaction object
-   * @returns {Promise<ethers.BigNumber>} - The estimated gas
-   */
-  async estimateGas(tx) {
-    try {
-      return await this.provider.estimateGas({
-        ...tx,
-        from: this.wallet.address
-      });
-    } catch (error) {
-      console.error("Gas estimation failed:", error);
-      throw new Error("Failed to estimate gas: " + error.message);
-    }
-  }
-
-  /**
    * Send a transaction with managed nonce and gas price optimization
    * @param {Object} tx - The transaction object
    * @returns {Promise<ethers.providers.TransactionResponse>} - The transaction response
@@ -173,7 +203,8 @@ export class PersistentMonadGasWallet {
       this.currentNonce++;
       this.pendingTxCount++;
       
-      // Sign and send the transaction using the gas wallet
+      // Send the transaction using the wallet directly
+      // We're bypassing apiManager.sendTransaction to avoid issues
       const response = await this.wallet.sendTransaction(txWithNonce);
       
       // Setup automatic nonce reset on failure

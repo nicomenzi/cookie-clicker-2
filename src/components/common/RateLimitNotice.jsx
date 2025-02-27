@@ -37,7 +37,7 @@ const RateLimitNotice = () => {
       </p>
       
       <p className="text-xs text-yellow-600">
-        This game now uses a rate-limited queue to manage transactions within these limits.
+        This game uses a rate-limited queue to manage transactions within these limits.
       </p>
     </div>
   );
