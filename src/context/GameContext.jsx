@@ -1,4 +1,4 @@
-// src/context/GameContext.jsx
+// src/context/GameContext.jsx - extreme request reduction
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { ethers } from 'ethers';
 import { useWalletContext } from './WalletContext';
@@ -12,6 +12,7 @@ import {
   getPlayerScore,
   getRedeemableTokens
 } from '../services/blockchain';
+import requestCoordinator from '../services/RequestCoordinator';
 
 // Create error tracking module
 const errorTracker = {
@@ -73,7 +74,6 @@ export const GameProvider = ({ children }) => {
   const [txQueue, setTxQueue] = useState([]);
   const [contractHasTokens, setContractHasTokens] = useState(true);
   const [processingTxCount, setProcessingTxCount] = useState(0);
-  // No longer need isClickEnabled state
   const [isLoadingTransactions, setIsLoadingTransactions] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(0);
   const [dataLoadError, setDataLoadError] = useState(null);
@@ -83,6 +83,7 @@ export const GameProvider = ({ children }) => {
   const processingRef = useRef(false);
   const txQueueRef = useRef([]);
   const processingCountRef = useRef(0);
+  const lastTxUpdateRef = useRef(0);
   
   // Keep refs in sync with state - this avoids re-renders triggering effects
   useEffect(() => {
@@ -90,12 +91,10 @@ export const GameProvider = ({ children }) => {
     processingCountRef.current = processingTxCount;
   }, [txQueue, processingTxCount]);
   
-  // Constants - OPTIMIZED FOR ALCHEMY API
-  const MAX_CONCURRENT_TX = 25; // Reduced from 100 to a more reasonable value
-  const MAX_QUEUE_LENGTH = 100; // Maximum number of transactions in the queue
-  const DATA_REFRESH_INTERVAL = 45000; // 45 seconds between data refreshes
-  const TX_HISTORY_REFRESH_INTERVAL = 90000; // 90 seconds between tx history refreshes
-  const MIN_REFRESH_INTERVAL = 10000; // Minimum 10s between refreshes
+  // Constants
+  const MAX_CONCURRENT_TX = 25; 
+  const MAX_QUEUE_LENGTH = 100;
+  const MIN_REFRESH_INTERVAL = 60 * 1000; // 1 minute (was 30s)
   
   // Calculate total score (confirmed + pending)
   const score = useMemo(() => confirmedScore + pendingClicks, [confirmedScore, pendingClicks]);
@@ -135,6 +134,10 @@ export const GameProvider = ({ children }) => {
         return prev;
       }
       
+      // Mark that we just updated transactions so background fetches can be skipped
+      lastTxUpdateRef.current = Date.now();
+      requestCoordinator.registerUserActivity();
+      
       return [pendingTx, ...prev.slice(0, 19)]; // Keep last 20
     });
     
@@ -143,11 +146,15 @@ export const GameProvider = ({ children }) => {
 
   // Update transaction status
   const updateTransaction = useCallback((txId, details) => {
-    setTransactions(prev => 
-      prev.map(tx => 
+    setTransactions(prev => {
+      // Mark that we just updated transactions so background fetches can be skipped
+      lastTxUpdateRef.current = Date.now();
+      requestCoordinator.registerUserActivity();
+      
+      return prev.map(tx => 
         tx.id === txId ? { ...tx, ...details } : tx
-      )
-    );
+      );
+    });
   }, []);
   
   // Handle cookie click without rate limiting
@@ -187,16 +194,30 @@ export const GameProvider = ({ children }) => {
       
       // Optimistic update of pending clicks count
       setPendingClicks(prev => prev + 1);
+      
+      // Update calculated redeemable tokens immediately without API call
+      const newPendingClicks = pendingClicks + 1;
+      const totalScore = confirmedScore + newPendingClicks;
+      // Only update UI for new full tokens earned
+      const newRedeemableTokens = Math.floor(totalScore / clicksPerToken);
+      requestCoordinator.setCachedData('redeemableTokens', newRedeemableTokens.toString(), gasWallet.address);
+      
+      // Register user activity
+      requestCoordinator.registerUserActivity();
     } catch (error) {
       alert(error.message);
     }
   }, [
     mainWallet.connected, 
     gasWallet.instance, 
-    gasWallet.balance, 
+    gasWallet.balance,
+    gasWallet.address,
     addPendingTransaction,
     networkStatus,
-    MAX_QUEUE_LENGTH
+    MAX_QUEUE_LENGTH,
+    pendingClicks,
+    confirmedScore,
+    clicksPerToken
   ]);
 
   // Handle redeeming cookies for tokens
@@ -264,6 +285,14 @@ export const GameProvider = ({ children }) => {
       });
       return newQueue;
     });
+    
+    // Clear all related caches to ensure fresh data after redeeming
+    requestCoordinator.clearCachedData('playerScore');
+    requestCoordinator.clearCachedData('redeemableTokens');
+    requestCoordinator.clearCachedData('cookieBalance');
+    
+    // Register user activity
+    requestCoordinator.registerUserActivity();
   }, [
     mainWallet.connected, 
     gasWallet.instance, 
@@ -299,6 +328,12 @@ export const GameProvider = ({ children }) => {
         // Update confirmed score and decrease pending clicks
         setConfirmedScore(prev => prev + 1);
         setPendingClicks(prev => Math.max(0, prev - 1));
+        
+        // Update caches
+        const newScore = confirmedScore + 1;
+        requestCoordinator.setCachedData('playerScore', newScore, gasWallet.address);
+        const newRedeemableTokens = Math.floor(newScore / clicksPerToken);
+        requestCoordinator.setCachedData('redeemableTokens', newRedeemableTokens.toString(), gasWallet.address);
       } else if (tx.type === 'Redeem') {
         // Send transaction using gas wallet
         const response = await redeemCookies(gasWallet.instance, tx.amount);
@@ -317,7 +352,8 @@ export const GameProvider = ({ children }) => {
         });
         
         // Trigger data reload but with a delay to avoid rate limits
-        setTimeout(() => loadUserData(true), 2000);
+        // This is important for redeem as it changes multiple states
+        setTimeout(() => loadUserData(true), 5000);
       }
     } catch (error) {
       errorTracker.add(error, `Processing ${tx.type} transaction`);
@@ -364,13 +400,13 @@ export const GameProvider = ({ children }) => {
     }
   };
 
-  // Optimized transaction processing with improved parallelism
+  // Optimized transaction processing
   useEffect(() => {
     if (networkStatus === 'offline' || !gasWallet.instance) return;
     
     let timeoutId = null;
     
-    // Non-recursive transaction processor with optimized throughput
+    // Non-recursive transaction processor
     const processNextTransaction = () => {
       // Clear any existing timeout
       if (timeoutId) {
@@ -378,12 +414,18 @@ export const GameProvider = ({ children }) => {
         timeoutId = null;
       }
       
+      // Don't process when document is hidden
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        timeoutId = setTimeout(processNextTransaction, 1000);
+        return;
+      }
+      
       // Get current queue state
       const currentQueue = txQueueRef.current;
       
       if (currentQueue.length === 0) {
         // No transactions to process, check again later
-        timeoutId = setTimeout(processNextTransaction, 50);
+        timeoutId = setTimeout(processNextTransaction, 500);
         return;
       }
       
@@ -392,18 +434,17 @@ export const GameProvider = ({ children }) => {
       
       if (availableSlots <= 0) {
         // We're at capacity, wait and check again
-        timeoutId = setTimeout(processNextTransaction, 50);
+        timeoutId = setTimeout(processNextTransaction, 100);
         return;
       }
       
-      // Process as many as possible up to available slots, but don't exceed 5 at a time
-      // to better manage rate limits
-      const transactionsToProcess = Math.min(availableSlots, currentQueue.length, 5);
+      // Process up to 3 transactions at a time (was 5)
+      const transactionsToProcess = Math.min(availableSlots, currentQueue.length, 3);
       
       // Get the transactions to process
       const transactions = currentQueue.slice(0, transactionsToProcess);
       
-      // Remove from queue - using a functional update to avoid race conditions
+      // Remove from queue
       setTxQueue(prevQueue => prevQueue.slice(transactionsToProcess));
       
       // Increment processing count
@@ -421,12 +462,12 @@ export const GameProvider = ({ children }) => {
           });
       });
       
-      // Schedule next batch processing with a small delay to avoid overwhelming the blockchain
-      timeoutId = setTimeout(processNextTransaction, 100);
+      // Schedule next batch processing
+      timeoutId = setTimeout(processNextTransaction, 200);
     };
     
     // Start the processor
-    timeoutId = setTimeout(processNextTransaction, 10);
+    timeoutId = setTimeout(processNextTransaction, 100);
     
     // Cleanup
     return () => {
@@ -436,84 +477,129 @@ export const GameProvider = ({ children }) => {
     };
   }, [gasWallet.instance, networkStatus, MAX_CONCURRENT_TX]);
   
-  // Load user data from blockchain
+  // Load user data with extreme optimization
   const loadUserData = useCallback(async (forceRefresh = false) => {
-    // Skip if offline
-    if (networkStatus === 'offline') return;
+    // Skip if offline or no wallet connection
+    if (networkStatus === 'offline' || !mainWallet.provider || !gasWallet.address) return;
     
     try {
-      if (!mainWallet.provider || !gasWallet.address) return;
+      // Register activity if this is a forced refresh
+      if (forceRefresh) requestCoordinator.registerUserActivity();
       
-      // Check if enough time has passed since last refresh
-      const now = Date.now();
-      if (!forceRefresh && (now - lastRefresh) < MIN_REFRESH_INTERVAL) {
-        return; // Don't refresh too frequently
+      // Check with coordinator if we should refresh player score
+      if (!requestCoordinator.shouldRefresh('playerScore', forceRefresh)) {
+        // Use cached player score if available
+        const cachedScore = requestCoordinator.getCachedData('playerScore', gasWallet.address);
+        if (cachedScore !== undefined) {
+          setConfirmedScore(cachedScore);
+        }
+        // Skip API call
+        console.log("Skipping playerScore API call - using cache");
+      } else {
+        // Fetch player score from blockchain
+        console.log("Fetching playerScore from blockchain");
+        setDataLoadError(null);
+        
+        try {
+          const clickerContract = getCookieClickerContract(mainWallet.provider);
+          const playerScore = await clickerContract.getScore(gasWallet.address);
+          const score = playerScore.toNumber();
+          
+          // Update state and cache
+          setConfirmedScore(score);
+          requestCoordinator.setCachedData('playerScore', score, gasWallet.address);
+          
+          // Also update redeemable tokens based on this score (avoid separate API call)
+          const redeemable = Math.floor(score / clicksPerToken);
+          setRedeemableTokens(redeemable.toString());
+          requestCoordinator.setCachedData('redeemableTokens', redeemable.toString(), gasWallet.address);
+        } catch (error) {
+          errorTracker.add(error, "Getting player score");
+        }
+      }
+            
+      // Only refresh less critical data on forced refresh or very infrequently
+      if (forceRefresh || requestCoordinator.shouldRefresh('contractConfig', false)) {
+        try {
+          const clickerContract = getCookieClickerContract(mainWallet.provider);
+          
+          // Batch fetch contract configuration
+          const [clicksPerTokenRes, hasTokensRes] = await Promise.all([
+            clickerContract.clicksPerToken().catch(e => {
+              errorTracker.add(e, "Getting clicks per token");
+              return ethers.BigNumber.from(clicksPerToken);
+            }),
+            
+            clickerContract.getContractBalance().catch(e => {
+              errorTracker.add(e, "Checking contract tokens");
+              return ethers.BigNumber.from(contractHasTokens ? 1 : 0);
+            })
+          ]);
+          
+          // Update state
+          setClicksPerToken(clicksPerTokenRes.toNumber());
+          setContractHasTokens(!hasTokensRes.isZero());
+          
+          // Cache contract config
+          requestCoordinator.setCachedData('clicksPerToken', clicksPerTokenRes.toNumber());
+          requestCoordinator.setCachedData('contractHasTokens', !hasTokensRes.isZero());
+          
+          // Update redeemable tokens again if clicks per token changed
+          const newRedeemable = Math.floor(confirmedScore / clicksPerTokenRes.toNumber());
+          if (newRedeemable.toString() !== redeemableTokens) {
+            setRedeemableTokens(newRedeemable.toString());
+            requestCoordinator.setCachedData('redeemableTokens', newRedeemable.toString(), gasWallet.address);
+          }
+        } catch (error) {
+          errorTracker.add(error, "Loading contract config");
+        }
       }
       
-      setLastRefresh(now);
-      setDataLoadError(null);
-      
-      // Get contract first to read configuration
-      const clickerContract = getCookieClickerContract(mainWallet.provider);
-      
-      // Get clicks per token
-      try {
-        const clicksPerToken = await clickerContract.clicksPerToken();
-        setClicksPerToken(clicksPerToken.toNumber());
-      } catch (error) {
-        errorTracker.add(error, "Getting clicks per token");
-        // Continue with other data
+      // Only fetch token balance on forced refresh or very infrequently
+      if (forceRefresh || requestCoordinator.shouldRefresh('cookieBalance', false)) {
+        try {
+          const tokenContract = getCookieTokenContract(mainWallet.provider);
+          const decimals = await tokenContract.decimals().catch(() => 18);
+          const balance = await tokenContract.balanceOf(gasWallet.address);
+          const formattedBalance = ethers.utils.formatUnits(balance, decimals);
+          
+          // Update state and cache
+          setCookieBalance(formattedBalance);
+          requestCoordinator.setCachedData('cookieBalance', formattedBalance, gasWallet.address);
+        } catch (error) {
+          errorTracker.add(error, "Loading token balance");
+        }
       }
       
-      // Load player score
-      try {
-        const playerScore = await getPlayerScore(mainWallet.provider, gasWallet.address);
-        setConfirmedScore(playerScore);
-      } catch (error) {
-        errorTracker.add(error, "Getting player score");
-        // Continue with other data
-      }
+      // Set last refresh time
+      setLastRefresh(Date.now());
       
-      // Load redeemable tokens
-      try {
-        const redeemableValue = await getRedeemableTokens(mainWallet.provider, gasWallet.address);
-        setRedeemableTokens(redeemableValue);
-      } catch (error) {
-        errorTracker.add(error, "Getting redeemable tokens");
-        // Continue with other data
-      }
-      
-      // Check if contract has tokens
-      try {
-        const hasTokens = await checkContractHasTokens(mainWallet.provider);
-        setContractHasTokens(hasTokens);
-      } catch (error) {
-        errorTracker.add(error, "Checking contract tokens");
-        // Continue with other data
-      }
-      
-      // Get token balance - separate try/catch because this is less critical
-      try {
-        const tokenContract = getCookieTokenContract(mainWallet.provider);
-        const decimals = await tokenContract.decimals();
-        const balance = await tokenContract.balanceOf(gasWallet.address);
-        setCookieBalance(ethers.utils.formatUnits(balance, decimals));
-      } catch (error) {
-        errorTracker.add(error, "Getting token balance");
-        // Non-critical error
-      }
     } catch (error) {
       errorTracker.add(error, "Loading user data");
       setDataLoadError("Failed to load game data. Will retry soon.");
     }
-  }, [mainWallet.provider, gasWallet.address, lastRefresh, networkStatus, MIN_REFRESH_INTERVAL]);
+  }, [
+    mainWallet.provider, 
+    gasWallet.address, 
+    networkStatus, 
+    confirmedScore, 
+    clicksPerToken, 
+    contractHasTokens, 
+    redeemableTokens
+  ]);
 
-  // Fetch transaction history with reduced frequency
-  const fetchTransactionHistory = useCallback(async () => {
-    // Skip if offline
-    if (networkStatus === 'offline') return;
+  // Fetch transaction history with extreme optimization
+  const fetchTransactionHistory = useCallback(async (forceRefresh = false) => {
+    // Skip if offline or no wallet connection
+    if (networkStatus === 'offline' || !mainWallet.provider || !gasWallet.address) return;
     
-    if (!mainWallet.provider || !gasWallet.address) return;
+    // Skip if we've recently updated transactions manually and this isn't a forced refresh
+    // or if the coordinator says we shouldn't refresh
+    if ((!forceRefresh && Date.now() - lastTxUpdateRef.current < 60000) || 
+        !requestCoordinator.shouldRefresh('transactionHistory', forceRefresh)) {
+      console.log("Skipping transaction history fetch - too recent or not needed");
+      return;
+    }
     
     // Don't show loading indicator if we already have transactions
     if (transactions.length === 0) {
@@ -521,8 +607,10 @@ export const GameProvider = ({ children }) => {
     }
     
     try {
-      // Use a smaller block count to reduce request size
-      const blockCount = 100; // Reduced from 250
+      console.log("Fetching transaction history from blockchain");
+      
+      // Reduce block count when we already have transaction history
+      const blockCount = transactions.length > 0 ? 50 : 100;
       
       // Fetch confirmed transactions from blockchain
       const confirmedTxs = await fetchTransactionsFromBlockchain(
@@ -545,11 +633,15 @@ export const GameProvider = ({ children }) => {
       // Combine pending and confirmed transactions
       const combinedTxs = [...filteredPendingTxs, ...confirmedTxs];
       
-      // Only keep the most recent 20 transactions to avoid clutter
+      // Only keep the most recent 20 transactions
       const limitedTxs = combinedTxs.slice(0, 20);
       
       // Update transaction list
       setTransactions(limitedTxs);
+      
+      // Remember that we just updated
+      lastTxUpdateRef.current = Date.now();
+      requestCoordinator.recordRefresh('transactionHistory');
     } catch (error) {
       errorTracker.add(error, "Fetching transaction history");
     } finally {
@@ -567,35 +659,67 @@ export const GameProvider = ({ children }) => {
     return () => clearTimeout(timer);
   }, [cookies]);
   
-  // Periodic data refresh - rate-limited for browser performance
+  // Periodic data refresh with extreme reduction
   useEffect(() => {
     if (mainWallet.provider && mainWallet.address && gasWallet.address) {
       // Initial load - stagger them to avoid bursts of requests
-      const initialLoadTimeout = setTimeout(() => loadUserData(true), 1000);
-      const initialTxTimeout = setTimeout(() => fetchTransactionHistory(), 3000);
+      // Longer delays for initial load to give browser time to stabilize
+      const initialLoadTimeout = setTimeout(() => loadUserData(true), 2000);
+      const initialTxTimeout = setTimeout(() => fetchTransactionHistory(true), 5000);
       
-      // Setup refresh intervals
-      const dataInterval = setInterval(() => {
-        if (networkStatus === 'online') {
-          loadUserData();
+      // Create a single consolidated refresh function
+      const refreshAllData = () => {
+        // Don't refresh when tab is hidden
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          return;
         }
-      }, DATA_REFRESH_INTERVAL);
+        
+        // Always load user data first
+        const now = Date.now();
+        if (now - lastRefresh >= MIN_REFRESH_INTERVAL) {
+          loadUserData(false);
+          
+          // Then load transaction history with a delay
+          setTimeout(() => {
+            fetchTransactionHistory(false);
+          }, 1000); // 1 second delay between calls
+        }
+      };
       
-      // Setup transaction history refresh interval (less frequent)
-      const txInterval = setInterval(() => {
-        if (networkStatus === 'online') {
-          fetchTransactionHistory();
+      // Single refresh interval - much longer
+      const refreshInterval = setInterval(refreshAllData, 2 * 60 * 1000); // 2 minutes
+      
+      // Visibility change handler - only load when becoming visible
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+          // When tab becomes visible again, do a refresh if it's been a while
+          const now = Date.now();
+          if (now - lastRefresh > MIN_REFRESH_INTERVAL) {
+            // Delay refresh slightly to let browser stabilize
+            setTimeout(() => loadUserData(false), 1000);
+            setTimeout(() => fetchTransactionHistory(false), 3000);
+          }
         }
-      }, TX_HISTORY_REFRESH_INTERVAL);
+      };
+      
+      document.addEventListener('visibilitychange', handleVisibilityChange);
       
       return () => {
         clearTimeout(initialLoadTimeout);
         clearTimeout(initialTxTimeout);
-        clearInterval(dataInterval);
-        clearInterval(txInterval);
+        clearInterval(refreshInterval);
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
       };
     }
-  }, [mainWallet.provider, mainWallet.address, gasWallet.address, loadUserData, fetchTransactionHistory, networkStatus, DATA_REFRESH_INTERVAL, TX_HISTORY_REFRESH_INTERVAL]);
+  }, [
+    mainWallet.provider, 
+    mainWallet.address, 
+    gasWallet.address, 
+    loadUserData, 
+    fetchTransactionHistory,
+    lastRefresh,
+    MIN_REFRESH_INTERVAL
+  ]);
   
   // Create a memoized context value to prevent unnecessary re-renders
   const contextValue = useMemo(() => ({

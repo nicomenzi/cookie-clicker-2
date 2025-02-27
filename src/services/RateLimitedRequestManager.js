@@ -1,8 +1,9 @@
 // src/services/RateLimitedRequestManager.js
+// Optimized with better caching and request batching
 
 /**
  * A strict rate-limited request manager specifically for Alchemy API
- * Updated to handle potential rate limits more effectively
+ * Optimized to reduce the number of requests
  */
 class RateLimitedRequestManager {
     constructor() {
@@ -15,20 +16,27 @@ class RateLimitedRequestManager {
       this.isProcessing = false;
       this.processingTimer = null;
       
-      // Rate limit settings for Alchemy API (more conservative to be safe)
+      // Rate limit settings - more conservative
       this.requestTimeWindow = 1000; // 1 second window
-      this.maxRequestsPerWindow = 9; // Keep under 10 req/sec to be safe
+      this.maxRequestsPerWindow = 5; // Much more conservative (was 9)
       this.requestTimestamps = [];
       
-      // Cache for read operations
+      // Cache for read operations - enhanced
       this.cache = new Map();
       this.cacheTTL = new Map();
       
-      // Default cache TTL settings based on data type
+      // Batch similar requests
+      this.pendingBatches = new Map();
+      this.batchTimeouts = new Map();
+      
+      // Default cache TTL settings - LONGER CACHING
       this.defaultTTLs = {
-        'balance': 10000,        // Balance: 10 seconds
-        'token-balance': 20000,  // Token balance: 20 seconds
-        'contract-config': 60000 // Contract configuration: 60 seconds
+        'player-score': 30000,      // Player score: 30 seconds (was 10s)
+        'balance': 60000,           // Balance: 1 minute (was 10s)
+        'token-balance': 120000,    // Token balance: 2 minutes (was 20s)
+        'redeemable-tokens': 60000, // Redeemable tokens: 1 minute (was 10s)
+        'contract-config': 300000,  // Contract configuration: 5 minutes (was 60s)
+        'transaction-history': 120000 // Transaction history: 2 minutes (was 30s)
       };
       
       // Error tracking
@@ -36,11 +44,47 @@ class RateLimitedRequestManager {
       this.lastErrorTime = 0;
       this.backoffTime = 1000; // Start with 1s backoff
       
-      // Track which RPC is being used
-      this.rpcFailures = new Map();
-      
       // Start the processing loop
       this.startProcessing();
+      
+      // Setup visibility change handler to pause processing when tab is hidden
+      this.setupVisibilityHandler();
+    }
+    
+    /**
+     * Setup visibility handler to pause processing when tab is hidden
+     */
+    setupVisibilityHandler() {
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'hidden') {
+            // Pause processing when tab is hidden
+            this.pauseProcessing();
+          } else {
+            // Resume processing when tab is visible
+            this.resumeProcessing();
+          }
+        });
+      }
+    }
+    
+    /**
+     * Pause processing when tab is hidden
+     */
+    pauseProcessing() {
+      if (this.processingTimer) {
+        clearTimeout(this.processingTimer);
+        this.processingTimer = null;
+      }
+    }
+    
+    /**
+     * Resume processing when tab is visible
+     */
+    resumeProcessing() {
+      if (!this.processingTimer) {
+        this.startProcessing();
+      }
     }
     
     /**
@@ -52,11 +96,17 @@ class RateLimitedRequestManager {
       }
       
       const processLoop = () => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          // Don't process when tab is hidden
+          this.processingTimer = setTimeout(processLoop, 1000);
+          return;
+        }
+        
         this.processNextRequest();
-        this.processingTimer = setTimeout(processLoop, 100); // Check queue every 100ms
+        this.processingTimer = setTimeout(processLoop, 200); // Check queue every 200ms
       };
       
-      this.processingTimer = setTimeout(processLoop, 100);
+      this.processingTimer = setTimeout(processLoop, 200);
     }
     
     /**
@@ -136,14 +186,17 @@ class RateLimitedRequestManager {
       
       // Check if it's a rate limit error specifically
       const isRateLimit = error?.message?.includes('429') || 
-                          error?.message?.includes('rate limit') || 
-                          error?.message?.includes('requests limited');
-                          
+                        error?.message?.includes('rate limit') || 
+                        error?.message?.includes('requests limited');
+                        
       // For rate limit errors, use a more aggressive backoff
       if (isRateLimit) {
-        this.maxRequestsPerWindow = Math.max(5, this.maxRequestsPerWindow - 1); // Reduce the rate further
+        // Reduce max requests per window
+        this.maxRequestsPerWindow = Math.max(2, this.maxRequestsPerWindow - 1);
+        console.warn(`Rate limit hit! Reducing to ${this.maxRequestsPerWindow} req/sec`);
+        
+        // Use a longer backoff
         this.backoffTime = Math.min(60000, Math.pow(2, Math.min(6, this.errorCount)) * 1000);
-        console.warn(`Rate limit hit! Reducing to ${this.maxRequestsPerWindow} req/sec with ${this.backoffTime}ms backoff`);
       } else {
         // Increase backoff time (max 30 seconds) for other errors
         this.backoffTime = Math.min(30000, Math.pow(2, Math.min(4, this.errorCount)) * 1000);
@@ -187,18 +240,17 @@ class RateLimitedRequestManager {
         // Cache if requested
         if (nextRequest.cacheKey) {
           this.cache.set(nextRequest.cacheKey, result);
-          this.cacheTTL.set(
-            nextRequest.cacheKey,
-            Date.now() + (nextRequest.cacheTTL || this.getDefaultTTL(nextRequest.cacheKey))
-          );
+          const ttl = nextRequest.cacheTTL || this.getDefaultTTL(nextRequest.cacheKey);
+          this.cacheTTL.set(nextRequest.cacheKey, Date.now() + ttl);
         }
         
         // Resolve the promise
         nextRequest.resolve(result);
         
         // Successful request - we can gradually increase allowed rate if needed
-        if (this.maxRequestsPerWindow < 9 && this.errorCount === 0) {
-          this.maxRequestsPerWindow = Math.min(9, this.maxRequestsPerWindow + 0.2);
+        if (this.maxRequestsPerWindow < 5 && this.errorCount === 0) {
+          // Very slowly increase the rate limit
+          this.maxRequestsPerWindow = Math.min(5, this.maxRequestsPerWindow + 0.1);
         }
       } catch (error) {
         console.error('Request error:', error);
@@ -281,7 +333,17 @@ class RateLimitedRequestManager {
           return ttl;
         }
       }
-      return 10000; // Default 10 second TTL
+      return 60000; // Default 1 minute TTL (was 10s)
+    }
+    
+    /**
+     * Create a batch key from request parameters
+     * @param {string} prefix - The batch prefix
+     * @param {Object} params - The parameters
+     * @returns {string} - The batch key
+     */
+    getBatchKey(prefix, params) {
+      return `${prefix}:${JSON.stringify(params)}`;
     }
     
     /**
@@ -295,6 +357,8 @@ class RateLimitedRequestManager {
     request(requestFn, cacheKey = null, cacheTTL = null, options = {}) {
       const priority = options.priority || 'normal';
       const maxRetries = options.maxRetries !== undefined ? options.maxRetries : 3;
+      const batchKey = options.batchKey || null;
+      const batchParams = options.batchParams || null;
       
       // Check cache first
       if (cacheKey && this.cache.has(cacheKey)) {
@@ -308,7 +372,54 @@ class RateLimitedRequestManager {
         }
       }
       
-      // Create a new promise
+      // If this is a batchable request, check for an existing batch
+      if (batchKey && batchParams) {
+        const fullBatchKey = this.getBatchKey(batchKey, batchParams);
+        
+        if (this.pendingBatches.has(fullBatchKey)) {
+          // Add to existing batch
+          return new Promise((resolve, reject) => {
+            this.pendingBatches.get(fullBatchKey).push({ resolve, reject });
+          });
+        } else {
+          // Create a new batch
+          this.pendingBatches.set(fullBatchKey, []);
+          
+          // Setup timeout to execute batch
+          const timeoutId = setTimeout(() => {
+            const batch = this.pendingBatches.get(fullBatchKey);
+            this.pendingBatches.delete(fullBatchKey);
+            this.batchTimeouts.delete(fullBatchKey);
+            
+            // Execute the batch request
+            requestFn()
+              .then(result => {
+                // Cache the result
+                if (cacheKey) {
+                  this.cache.set(cacheKey, result);
+                  const ttl = cacheTTL || this.getDefaultTTL(cacheKey);
+                  this.cacheTTL.set(cacheKey, Date.now() + ttl);
+                }
+                
+                // Resolve all promises in the batch
+                batch.forEach(({ resolve }) => resolve(result));
+              })
+              .catch(error => {
+                // Reject all promises in the batch
+                batch.forEach(({ reject }) => reject(error));
+              });
+          }, 20); // Short delay to allow batching
+          
+          this.batchTimeouts.set(fullBatchKey, timeoutId);
+        }
+        
+        // Return promise for the current request
+        return new Promise((resolve, reject) => {
+          this.pendingBatches.get(fullBatchKey).push({ resolve, reject });
+        });
+      }
+      
+      // Create a new promise for non-batchable requests
       return new Promise((resolve, reject) => {
         const request = {
           fn: requestFn,
@@ -369,10 +480,14 @@ class RateLimitedRequestManager {
       if (settings.requestTimeWindow) {
         this.requestTimeWindow = settings.requestTimeWindow;
       }
+      
+      if (settings.cacheTTLs) {
+        this.defaultTTLs = { ...this.defaultTTLs, ...settings.cacheTTLs };
+      }
     }
     
     /**
-     * Get current queue stats
+     * Get current queue and cache stats
      * @returns {Object} - Queue statistics
      */
     getStats() {
@@ -384,11 +499,58 @@ class RateLimitedRequestManager {
         backoffTime: this.backoffTime,
         errorCount: this.errorCount,
         isProcessing: this.isProcessing,
-        currentRequestCount: this.requestTimestamps.length
+        currentRequestCount: this.requestTimestamps.length,
+        cacheSize: this.cache.size,
+        pendingBatches: this.pendingBatches.size
       };
     }
+    // Add these missing helper methods to RateLimitedRequestManager.js class
+
+/**
+ * Check if a key exists in cache and is not expired
+ * @param {string} cacheKey - The cache key to check
+ * @returns {boolean} - True if the key exists and is not expired
+ */
+hasInCache(cacheKey) {
+    if (!this.cache.has(cacheKey)) return false;
+    const expiry = this.cacheTTL.get(cacheKey);
+    return expiry > Date.now();
+  }
+  
+  /**
+   * Get a value from cache
+   * @param {string} cacheKey - The cache key to get
+   * @returns {any} - The cached value or null if not found
+   */
+  getFromCache(cacheKey) {
+    if (this.hasInCache(cacheKey)) {
+      return this.cache.get(cacheKey);
+    }
+    return null;
+  }
+  
+  /**
+   * Clear all cache keys matching a pattern
+   * @param {string} pattern - The pattern to match
+   */
+  clearCachePattern(pattern) {
+    if (!pattern) return;
+    
+    // Find all keys that match the pattern
+    for (const key of this.cache.keys()) {
+      if (key.includes(pattern)) {
+        this.cache.delete(key);
+        this.cacheTTL.delete(key);
+      }
+    }
+  }
+
+
+
   }
   
   // Create a singleton instance
   const rateLimitedManager = new RateLimitedRequestManager();
   export default rateLimitedManager;
+
+  

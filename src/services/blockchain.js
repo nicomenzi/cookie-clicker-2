@@ -148,14 +148,19 @@ export const checkContractHasTokens = async (provider) => {
     provider = getAlchemyProvider();
   }
   
+  // Add time-based cache key to reduce frequency
+  const cacheInterval = 5 * 60 * 1000; // 5 minutes
+  const cacheTimeBlock = Math.floor(Date.now() / cacheInterval);
+  const cacheKey = `contract-has-tokens-${cacheTimeBlock}`;
+  
   return rateLimitedManager.request(
     async () => {
       const contract = getCookieClickerContract(provider);
       const balance = await contract.getContractBalance();
       return !balance.isZero();
     },
-    'contract-has-tokens',
-    60000, // 1 minute cache
+    cacheKey,
+    300000, // 5 minute cache (increased from 60s)
     { priority: 'low' }
   ).catch((error) => {
     console.warn("Error checking contract tokens:", error);
@@ -178,14 +183,19 @@ export const getPlayerScore = async (provider, address) => {
     throw new Error("Address is required");
   }
   
+  // Add time-based cache key to reduce frequency
+  const cacheInterval = 30 * 1000; // 30 seconds
+  const cacheTimeBlock = Math.floor(Date.now() / cacheInterval);
+  const cacheKey = `player-score-${address}-${cacheTimeBlock}`;
+  
   return rateLimitedManager.request(
     async () => {
       const contract = getCookieClickerContract(provider);
       const score = await contract.getScore(address);
       return score.toNumber();
     },
-    `player-score-${address}`,
-    10000, // 10 second cache
+    cacheKey,
+    30000, // 30 second cache (up from 10s)
     { priority: 'normal' }
   ).catch(error => {
     console.error("Error getting player score:", error);
@@ -203,14 +213,19 @@ export const getClicksPerToken = async (provider) => {
     provider = getAlchemyProvider();
   }
   
+  // Add time-based cache key to reduce frequency
+  const cacheInterval = 15 * 60 * 1000; // 15 minutes
+  const cacheTimeBlock = Math.floor(Date.now() / cacheInterval);
+  const cacheKey = `clicks-per-token-${cacheTimeBlock}`;
+  
   return rateLimitedManager.request(
     async () => {
       const contract = getCookieClickerContract(provider);
       const clicksPerToken = await contract.clicksPerToken();
       return clicksPerToken.toNumber();
     },
-    'clicks-per-token',
-    60000, // 1 minute cache - this rarely changes
+    cacheKey,
+    900000, // 15 minute cache - this rarely changes
     { priority: 'low' }
   ).catch(error => {
     console.error("Error getting clicks per token:", error);
@@ -219,7 +234,7 @@ export const getClicksPerToken = async (provider) => {
 };
 
 /**
- * Get redeemable tokens for a player with caching
+ * Get redeemable tokens for a player with enhanced caching
  * @param {ethers.providers.Provider} provider - Ethereum provider
  * @param {string} address - Player's address
  * @returns {Promise<string>} - Redeemable tokens (formatted)
@@ -233,15 +248,47 @@ export const getRedeemableTokens = async (provider, address) => {
     throw new Error("Address is required");
   }
   
+  // Enhanced caching key with timestamps to force less frequent updates
+  const cacheInterval = 2 * 60 * 1000; // 2 minutes
+  const cacheTimeBlock = Math.floor(Date.now() / cacheInterval);
+  const cacheKey = `redeemable-tokens-${address}-${cacheTimeBlock}`;
+  
   return rateLimitedManager.request(
     async () => {
-      const contract = getCookieClickerContract(provider);
-      const rawTokens = await contract.getRedeemableTokens(address);
-      return rawTokens.toString();
+      // Calculate approximately based on confirmed score if possible
+      try {
+        // First check if we can compute it locally based on score and clicks per token
+        const [playerScore, clicksPerToken] = await Promise.all([
+          getPlayerScore(provider, address),
+          getClicksPerToken(provider)
+        ]);
+        
+        // Calculate from score and clicks per token
+        const redeemableTokens = Math.floor(playerScore / clicksPerToken);
+        console.log(`[CACHE] Calculated redeemable tokens: ${redeemableTokens}`);
+        return redeemableTokens.toString();
+      } catch (error) {
+        console.warn("Error calculating redeemable tokens:", error);
+        
+        // Fallback to direct contract call
+        try {
+          console.log("[API] Fetching redeemable tokens from contract");
+          const contract = getCookieClickerContract(provider);
+          const rawTokens = await contract.getRedeemableTokens(address);
+          return rawTokens.toString();
+        } catch (fallbackError) {
+          console.error("Fallback also failed:", fallbackError);
+          return "0"; // Default to 0 on error
+        }
+      }
     },
-    `redeemable-tokens-${address}`,
-    10000, // 10 second cache
-    { priority: 'normal' }
+    cacheKey,
+    300000, // 5 minute cache for redeemable tokens
+    { 
+      priority: 'low', // Lowest priority since this is calculated locally
+      batchKey: 'redeemable-tokens',
+      batchParams: { address }
+    }
   ).catch(error => {
     console.error("Error getting redeemable tokens:", error);
     return "0";
@@ -263,6 +310,11 @@ export const getTokenBalance = async (provider, address) => {
     throw new Error("Address is required");
   }
   
+  // Add time-based cache key to reduce frequency
+  const cacheInterval = 60 * 1000; // 1 minute
+  const cacheTimeBlock = Math.floor(Date.now() / cacheInterval);
+  const cacheKey = `token-balance-${address}-${cacheTimeBlock}`;
+  
   return rateLimitedManager.request(
     async () => {
       const contract = getCookieTokenContract(provider);
@@ -270,8 +322,8 @@ export const getTokenBalance = async (provider, address) => {
       const balance = await contract.balanceOf(address);
       return ethers.utils.formatUnits(balance, decimals);
     },
-    `token-balance-${address}`,
-    10000, // 10 second cache
+    cacheKey,
+    120000, // 2 minute cache
     { priority: 'normal' }
   ).catch(error => {
     console.error("Error getting token balance:", error);
@@ -362,7 +414,7 @@ export const redeemCookies = async (gasWallet, amount = 0) => {
       gasLimit
     };
     
-    // Clear related caches
+    // Clear related caches - all of them for this address across time blocks
     const walletAddress = gasWallet.getAddress();
     if (walletAddress) {
       rateLimitedManager.clearCache(`player-score-${walletAddress}`);
@@ -464,121 +516,156 @@ export const fetchTransactionsFromBlockchain = async (provider, walletAddress, b
     throw new Error("Wallet address is required");
   }
   
+  // Add time-based cache key to reduce frequency
+  const cacheInterval = 60 * 1000; // 1 minute
+  const cacheTimeBlock = Math.floor(Date.now() / cacheInterval);
+  const cacheKey = `transaction-history-${walletAddress}-${blockCount}-${cacheTimeBlock}`;
+  
   return rateLimitedManager.request(
     async () => {
-      console.log(`Fetching transaction history for ${walletAddress}`);
+      console.log(`Fetching transaction history for ${walletAddress} (${blockCount} blocks)`);
       
-      // Get current block number
-      const currentBlock = await provider.getBlockNumber();
-      const fromBlock = Math.max(0, currentBlock - blockCount);
-      
-      // Define events
-      const events = [
-        { 
-          name: 'Click', 
-          signature: 'Click(address,uint256)',
-          processLog: (log, block, linterface) => {
-            const parsedLog = linterface.parseLog(log);
-            return {
-              id: log.transactionHash,
-              type: 'Click',
-              txHash: log.transactionHash,
-              status: 'confirmed',
-              timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
-              points: 1,
-              blockNumber: log.blockNumber
-            };
-          }
-        },
-        {
-          name: 'Redeem',
-          signature: 'Redeem(address,uint256,uint256)',
-          processLog: (log, block, linterface) => {
-            const parsedLog = linterface.parseLog(log);
-            return {
-              id: log.transactionHash,
-              type: 'Redeem',
-              txHash: log.transactionHash,
-              status: 'confirmed',
-              timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
-              points: -parsedLog.args.score.toNumber(),
-              tokens: parsedLog.args.tokens.toNumber(),
-              blockNumber: log.blockNumber
-            };
-          }
-        },
-        {
-          name: 'Fund',
-          signature: 'ContractFunded(address,uint256)',
-          processLog: (log, block, linterface) => {
-            const parsedLog = linterface.parseLog(log);
-            return {
-              id: log.transactionHash,
-              type: 'Fund',
-              txHash: log.transactionHash,
-              status: 'confirmed',
-              timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
-              amount: ethers.utils.formatUnits(parsedLog.args.amount, 18) + " $COOKIE",
-              blockNumber: log.blockNumber
-            };
-          }
-        }
-      ];
-      
-      // Create interface for parsing logs
-      const clickerInterface = new ethers.utils.Interface(COOKIE_CLICKER_ABI);
-      
-      // Process each event type sequentially to avoid rate limit issues
-      let allTransactions = [];
-      const blockCache = {};
-      
-      for (const event of events) {
-        try {
-          // Create filter for this event
-          const filter = {
+      try {
+        // Get current block number
+        const currentBlock = await provider.getBlockNumber();
+        const fromBlock = Math.max(0, currentBlock - blockCount);
+        
+        // Define topic filters for each event type
+        const clickTopics = [
+          ethers.utils.id('Click(address,uint256)'),
+          ethers.utils.hexZeroPad(walletAddress.toLowerCase(), 32)
+        ];
+        
+        const redeemTopics = [
+          ethers.utils.id('Redeem(address,uint256,uint256)'),
+          ethers.utils.hexZeroPad(walletAddress.toLowerCase(), 32)
+        ];
+        
+        const fundTopics = [
+          ethers.utils.id('ContractFunded(address,uint256)'),
+          ethers.utils.hexZeroPad(walletAddress.toLowerCase(), 32)
+        ];
+        
+        // Make a single batch request for all logs with multiple filters
+        // This significantly reduces the number of separate RPC calls
+        const [clickLogs, redeemLogs, fundLogs] = await Promise.all([
+          provider.getLogs({
             fromBlock,
             address: COOKIE_CLICKER_ADDRESS,
-            topics: [
-              ethers.utils.id(event.signature),
-              ethers.utils.hexZeroPad(walletAddress.toLowerCase(), 32)
-            ]
-          };
-          
-          // Get logs for this event
-          const logs = await provider.getLogs(filter);
-          
-          // Process logs sequentially
-          for (const log of logs) {
-            try {
-              // Get block info (with caching)
-              if (!blockCache[log.blockNumber]) {
-                blockCache[log.blockNumber] = await provider.getBlock(log.blockNumber);
-              }
-              const block = blockCache[log.blockNumber];
-              
-              // Process log into transaction object
-              const tx = event.processLog(log, block, clickerInterface);
-              allTransactions.push(tx);
-            } catch (logError) {
-              console.error(`Error processing ${event.name} log:`, logError);
-            }
-          }
-        } catch (eventError) {
-          console.error(`Error fetching ${event.name} events:`, eventError);
+            topics: clickTopics
+          }),
+          provider.getLogs({
+            fromBlock,
+            address: COOKIE_CLICKER_ADDRESS,
+            topics: redeemTopics
+          }),
+          provider.getLogs({
+            fromBlock,
+            address: COOKIE_CLICKER_ADDRESS,
+            topics: fundTopics
+          })
+        ]);
+        
+        // Create interfaces for parsing
+        const clickerInterface = new ethers.utils.Interface(COOKIE_CLICKER_ABI);
+        
+        // Combine all logs
+        const allLogs = [
+          ...clickLogs.map(log => ({ type: 'Click', log })),
+          ...redeemLogs.map(log => ({ type: 'Redeem', log })),
+          ...fundLogs.map(log => ({ type: 'Fund', log }))
+        ];
+        
+        // Sort by block number (descending)
+        allLogs.sort((a, b) => b.log.blockNumber - a.log.blockNumber);
+        
+        // Take only the 40 most recent logs to reduce processing (we only show 20 anyway)
+        const recentLogs = allLogs.slice(0, 40);
+        
+        // Create a Set of block numbers we need to fetch
+        const blockSet = new Set(recentLogs.map(item => item.log.blockNumber));
+        const blockNumbers = Array.from(blockSet);
+        
+        // Fetch blocks in batches of 5 to avoid overloading the API
+        const blockCache = {};
+        const fetchBatches = [];
+        
+        for (let i = 0; i < blockNumbers.length; i += 5) {
+          const batch = blockNumbers.slice(i, i + 5);
+          fetchBatches.push(Promise.all(
+            batch.map(async blockNum => {
+              const block = await provider.getBlock(blockNum);
+              blockCache[blockNum] = block;
+              return block;
+            })
+          ));
         }
+        
+        // Execute all batches sequentially
+        for (const batchPromise of fetchBatches) {
+          await batchPromise;
+        }
+        
+        // Process all logs
+        const transactions = [];
+        
+        for (const item of recentLogs) {
+          try {
+            const block = blockCache[item.log.blockNumber];
+            if (!block) continue;
+            
+            let tx;
+            
+            if (item.type === 'Click') {
+              const parsedLog = clickerInterface.parseLog(item.log);
+              tx = {
+                id: item.log.transactionHash,
+                type: 'Click',
+                txHash: item.log.transactionHash,
+                status: 'confirmed',
+                timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
+                points: 1
+              };
+            } else if (item.type === 'Redeem') {
+              const parsedLog = clickerInterface.parseLog(item.log);
+              tx = {
+                id: item.log.transactionHash,
+                type: 'Redeem',
+                txHash: item.log.transactionHash,
+                status: 'confirmed',
+                timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
+                points: -parsedLog.args.score.toNumber(),
+                tokens: parsedLog.args.tokens.toNumber()
+              };
+            } else if (item.type === 'Fund') {
+              const parsedLog = clickerInterface.parseLog(item.log);
+              tx = {
+                id: item.log.transactionHash,
+                type: 'Fund',
+                txHash: item.log.transactionHash,
+                status: 'confirmed',
+                timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
+                amount: ethers.utils.formatUnits(parsedLog.args.amount, 18) + " $COOKIE"
+              };
+            }
+            
+            if (tx) {
+              transactions.push(tx);
+            }
+          } catch (error) {
+            console.error(`Error processing log:`, error);
+          }
+        }
+        
+        // Limit to 20 transactions
+        return transactions.slice(0, 20);
+      } catch (error) {
+        console.error("Error fetching transaction history:", error);
+        throw error; // Let the rate-limiter handle retries
       }
-      
-      // Sort by block number (descending)
-      allTransactions.sort((a, b) => b.blockNumber - a.blockNumber);
-      
-      // Remove blockNumber from result
-      return allTransactions.map(tx => {
-        const { blockNumber, ...rest } = tx;
-        return rest;
-      });
     },
-    `transaction-history-${walletAddress}-${blockCount}`,
-    30000, // 30 second cache for transaction history
+    cacheKey,
+    120000, // 2 minute cache for transaction history (increased from 60s)
     { 
       priority: 'low',
       maxRetries: 2
