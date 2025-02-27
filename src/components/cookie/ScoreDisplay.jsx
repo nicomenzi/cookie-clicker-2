@@ -2,6 +2,7 @@
 import React from 'react';
 import { useGameContext } from '../../context/GameContext';
 import { AlertCircle, Clock, Activity } from 'lucide-react';
+import QueueIndicator from '../common/QueueIndicator';
 
 const ScoreDisplay = () => {
   const { 
@@ -42,6 +43,9 @@ const ScoreDisplay = () => {
         </div>
       </div>
       
+      {/* Queue Indicator */}
+      <QueueIndicator />
+      
       {/* Transaction Status Indicators */}
       {(processingTxCount > 0 || pendingTxs.length > 0) && (
         <div className="mt-3 flex flex-col items-center">
@@ -50,14 +54,6 @@ const ScoreDisplay = () => {
             <div className="bg-blue-100 text-blue-700 px-3 py-1 rounded-full text-xs flex items-center mb-1">
               <Activity size={12} className="animate-pulse mr-1" />
               Processing {processingTxCount} transaction{processingTxCount > 1 ? 's' : ''}
-            </div>
-          )}
-          
-          {/* Pending Click Transactions */}
-          {pendingClickTxs > 0 && (
-            <div className="bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full text-xs flex items-center mb-1">
-              <Clock size={12} className="mr-1" />
-              {pendingClickTxs} click{pendingClickTxs > 1 ? 's' : ''} pending
             </div>
           )}
           
