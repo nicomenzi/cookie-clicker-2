@@ -2,14 +2,17 @@
 import React, { useMemo } from 'react';
 import { useTransactionContext } from '../../context/TransactionContext';
 import { useWalletContext } from '../../context/WalletContext';
-import { CheckCircle, XCircle, Clock, Activity, Link } from 'lucide-react';
+import { CheckCircle, XCircle, Clock, Activity, Link, RefreshCw, AlertCircle } from 'lucide-react';
 
 const TransactionManager = () => {
   const { 
     transactions, 
     processingTxCount, 
     isLoadingTransactions,
-    queueLength
+    hasInitiallyLoaded,
+    loadError,
+    queueLength,
+    fetchTransactionHistory
   } = useTransactionContext();
   
   const { mainWallet, gasWallet } = useWalletContext();
@@ -25,12 +28,21 @@ const TransactionManager = () => {
     }, { total: 0 });
   }, [transactions]);
   
-  // Check if wallet is connected but we have no transactions
+  // Only show "no transactions" if wallet is connected, we've successfully loaded data, 
+  // and we're not currently loading
   const isConnectedWithNoTransactions = 
     mainWallet.connected && 
     gasWallet.address && 
     transactions.length === 0 && 
-    !isLoadingTransactions;
+    !isLoadingTransactions &&
+    hasInitiallyLoaded;
+  
+  // Handle manual refresh
+  const handleManualRefresh = () => {
+    if (mainWallet.provider && gasWallet.address) {
+      fetchTransactionHistory();
+    }
+  };
 
   // Render the transaction list
   const renderTransactionList = () => (
@@ -38,19 +50,43 @@ const TransactionManager = () => {
       <div className="flex justify-between items-center mb-2">
         <h2 className="font-bold text-lg">Recent Transactions</h2>
         
-        {pendingCounts.total > 0 && (
-          <div className="bg-yellow-100 text-yellow-700 text-xs px-2 py-1 rounded-full flex items-center">
-            <span className="inline-block w-3 h-3 rounded-full border-2 border-yellow-400 border-t-transparent animate-spin mr-1"></span>
-            {pendingCounts.total} pending
-          </div>
-        )}
+        <div className="flex items-center">
+          {pendingCounts.total > 0 && (
+            <div className="bg-yellow-100 text-yellow-700 text-xs px-2 py-1 rounded-full flex items-center mr-2">
+              <span className="inline-block w-3 h-3 rounded-full border-2 border-yellow-400 border-t-transparent animate-spin mr-1"></span>
+              {pendingCounts.total} pending
+            </div>
+          )}
+          
+          <button 
+            onClick={handleManualRefresh}
+            disabled={!mainWallet.connected || isLoadingTransactions}
+            className="text-gray-500 hover:text-gray-700 disabled:opacity-50"
+            title="Refresh transactions"
+          >
+            <RefreshCw size={16} className={isLoadingTransactions ? "animate-spin" : ""} />
+          </button>
+        </div>
       </div>
       
+      {/* Loading indicator overlay - shows alongside existing transactions */}
       {isLoadingTransactions && (
-        <div className="flex items-center justify-center py-4">
-          <div className="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full mr-2"></div>
-          <div className="text-sm text-gray-500">
-            Loading transactions...
+        <div className="bg-blue-50 rounded p-2 mb-2 flex items-center">
+          <div className="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full mr-2"></div>
+          <div className="text-xs text-blue-600">
+            {transactions.length > 0 
+              ? "Refreshing transaction history..." 
+              : "Loading transaction history..."}
+          </div>
+        </div>
+      )}
+      
+      {/* Show load error if any */}
+      {loadError && (
+        <div className="bg-red-50 rounded p-2 mb-2 flex items-center">
+          <AlertCircle size={16} className="text-red-500 mr-2" />
+          <div className="text-xs text-red-600">
+            {loadError}
           </div>
         </div>
       )}
@@ -84,17 +120,23 @@ const TransactionManager = () => {
         </div>
       )}
       
-      {!isLoadingTransactions && transactions.length > 0 && (
+      {transactions.length > 0 && (
         <div className="space-y-2">
           {transactions.map((tx) => (
-            <TransactionItem key={tx.id || tx.txHash} transaction={tx} />
+            <TransactionItem key={tx.id || tx.txHash || Math.random().toString(36).substring(2)} transaction={tx} />
           ))}
         </div>
       )}
       
-      {!mainWallet.connected && (
+      {!mainWallet.connected && !isLoadingTransactions && (
         <div className="text-gray-500 text-sm text-center py-4">
           Connect your wallet to see transaction history
+        </div>
+      )}
+      
+      {mainWallet.connected && !hasInitiallyLoaded && !isLoadingTransactions && (
+        <div className="text-gray-500 text-sm text-center py-4">
+          Click the refresh button to load your transactions
         </div>
       )}
     </div>

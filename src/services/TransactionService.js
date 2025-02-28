@@ -1,4 +1,4 @@
-// src/services/TransactionService.js
+// src/services/TransactionService.js - No History Fetching
 import { ethers } from 'ethers';
 import { getCookieClickerContract, getCookieTokenContract, getTokenDecimals } from './ContractService';
 import { COOKIE_TOKEN_ADDRESS, COOKIE_CLICKER_ADDRESS, COOKIE_CLICKER_ABI } from '../constants/contracts';
@@ -30,8 +30,6 @@ export const recordClick = async (gasWallet) => {
     // Send transaction directly without going through apiManager
     return await gasWallet.sendTransaction(tx);
   } catch (error) {
-    console.error("Error recording click:", error);
-    
     // Check for insufficient balance error
     if (error.message && (
       error.message.includes("insufficient balance") || 
@@ -85,8 +83,6 @@ export const redeemCookies = async (gasWallet, amount = 0) => {
     // Send transaction directly without going through apiManager
     return await gasWallet.sendTransaction(tx);
   } catch (error) {
-    console.error("Error redeeming cookies:", error);
-    
     // Check for insufficient balance error
     if (error.message && (
       error.message.includes("insufficient balance") || 
@@ -150,8 +146,6 @@ export const fundClickerContract = async (signer, amount) => {
     const clickerWithSigner = getCookieClickerContract(signer);
     return await clickerWithSigner.fundContract(tokenAmount);
   } catch (error) {
-    console.error("Error funding contract:", error);
-    
     // Provide more user-friendly error messages
     if (error.message && error.message.includes("insufficient")) {
       throw new Error("You don't have enough tokens to fund the contract.");
@@ -162,141 +156,10 @@ export const fundClickerContract = async (signer, amount) => {
 };
 
 /**
- * Fetch transactions from blockchain efficiently with caching
- * @param {ethers.providers.Provider} provider - Ethereum provider
- * @param {string} walletAddress - Wallet address to check
- * @param {number} blockCount - Number of blocks to look back
- * @returns {Promise<Array>} - Array of transactions
+ * Placeholder function for API compatibility - doesn't actually fetch from blockchain
+ * @returns {Promise<Array>} - Empty array since we're not fetching transaction history
  */
-export const fetchTransactionsFromBlockchain = async (provider, walletAddress, blockCount = 100) => {
-  if (!provider) {
-    provider = new ethers.providers.JsonRpcProvider(MONAD_TESTNET.rpcUrls[0]);
-  }
-  
-  if (!walletAddress) {
-    throw new Error("Wallet address is required");
-  }
-  
-  try {
-    console.log(`Fetching transaction history for ${walletAddress}`, new Date().toLocaleTimeString());
-    
-    // Get current block number
-    const currentBlock = await provider.getBlockNumber();
-    const fromBlock = Math.max(0, currentBlock - blockCount);
-    
-    console.log(`Current block: ${currentBlock}, Looking from block: ${fromBlock}`);
-    
-    // Define events
-    const events = [
-      { 
-        name: 'Click', 
-        signature: 'Click(address,uint256)',
-        processLog: (log, block, linterface) => {
-          const parsedLog = linterface.parseLog(log);
-          return {
-            id: log.transactionHash,
-            type: 'Click',
-            txHash: log.transactionHash,
-            status: 'confirmed',
-            timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
-            points: 1,
-            blockNumber: log.blockNumber
-          };
-        }
-      },
-      {
-        name: 'Redeem',
-        signature: 'Redeem(address,uint256,uint256)',
-        processLog: (log, block, linterface) => {
-          const parsedLog = linterface.parseLog(log);
-          return {
-            id: log.transactionHash,
-            type: 'Redeem',
-            txHash: log.transactionHash,
-            status: 'confirmed',
-            timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
-            points: -parsedLog.args.score.toNumber(),
-            tokens: parsedLog.args.tokens.toNumber(),
-            blockNumber: log.blockNumber
-          };
-        }
-      },
-      {
-        name: 'Fund',
-        signature: 'ContractFunded(address,uint256)',
-        processLog: (log, block, linterface) => {
-          const parsedLog = linterface.parseLog(log);
-          return {
-            id: log.transactionHash,
-            type: 'Fund',
-            txHash: log.transactionHash,
-            status: 'confirmed',
-            timestamp: new Date(block.timestamp * 1000).toLocaleTimeString(),
-            amount: ethers.utils.formatUnits(parsedLog.args.amount, 18) + " $COOKIE",
-            blockNumber: log.blockNumber
-          };
-        }
-      }
-    ];
-    
-    // Create interface for parsing logs
-    const clickerInterface = new ethers.utils.Interface(COOKIE_CLICKER_ABI);
-    
-    // Process each event type
-    let allTransactions = [];
-    const blockCache = {};
-    
-    for (const event of events) {
-      try {
-        console.log(`Fetching ${event.name} events`);
-        
-        // Create filter for this event
-        const filter = {
-          fromBlock,
-          address: COOKIE_CLICKER_ADDRESS,
-          topics: [
-            ethers.utils.id(event.signature),
-            ethers.utils.hexZeroPad(walletAddress.toLowerCase(), 32)
-          ]
-        };
-        
-        // Get logs for this event
-        const logs = await provider.getLogs(filter);
-        console.log(`Found ${logs.length} ${event.name} logs`);
-        
-        // Process logs
-        for (const log of logs) {
-          try {
-            // Get block info (with caching)
-            if (!blockCache[log.blockNumber]) {
-              blockCache[log.blockNumber] = await provider.getBlock(log.blockNumber);
-            }
-            const block = blockCache[log.blockNumber];
-            
-            // Process log into transaction object
-            const tx = event.processLog(log, block, clickerInterface);
-            allTransactions.push(tx);
-          } catch (logError) {
-            console.error(`Error processing ${event.name} log:`, logError);
-          }
-        }
-      } catch (eventError) {
-        console.error(`Error fetching ${event.name} events:`, eventError);
-      }
-    }
-    
-    // Sort by block number (descending)
-    allTransactions.sort((a, b) => b.blockNumber - a.blockNumber);
-    
-    console.log(`Total transactions found: ${allTransactions.length}`);
-    
-    // Remove blockNumber from result
-    return allTransactions.map(tx => {
-      const { blockNumber, ...rest } = tx;
-      return rest;
-    });
-  } catch (error) {
-    console.error("Error fetching transaction history:", error);
-    return [];
-  }
+export const fetchTransactionsFromBlockchain = async () => {
+  // Return empty array - we're not fetching transactions from blockchain anymore
+  return [];
 };

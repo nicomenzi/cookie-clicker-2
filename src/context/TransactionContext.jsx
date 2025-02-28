@@ -1,7 +1,7 @@
 // src/context/TransactionContext.jsx
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { ethers } from 'ethers';
 import { useWalletContext } from './WalletContext';
-import { fetchTransactionsFromBlockchain } from '../services/TransactionService';
 import apiManager from '../services/ApiManager';
 
 export const TransactionContext = createContext();
@@ -14,13 +14,16 @@ export const TransactionProvider = ({ children }) => {
   // Transaction state
   const [transactions, setTransactions] = useState([]);
   const [isLoadingTransactions, setIsLoadingTransactions] = useState(false);
+  const [hasInitiallyLoaded, setHasInitiallyLoaded] = useState(true); // Start as true to avoid initial loading
   const [txQueue, setTxQueue] = useState([]);
   const [processingTxCount, setProcessingTxCount] = useState(0);
   const [networkStatus, setNetworkStatus] = useState('online');
+  const [loadError, setLoadError] = useState(null);
   
   // Refs for tracking state without re-renders
   const txQueueRef = useRef([]);
   const lastTxUpdateRef = useRef(0);
+  const fetchInProgressRef = useRef(false);
   
   // Keep refs in sync with state
   useEffect(() => {
@@ -85,58 +88,37 @@ export const TransactionProvider = ({ children }) => {
     });
   }, []);
   
-  // Fetch transaction history
+  // No transaction history fetching - now just a placeholder function that cleans pending transactions
   const fetchTransactionHistory = useCallback(async (forceRefresh = false) => {
-    // Skip if offline or no wallet connection
-    if (networkStatus === 'offline' || !mainWallet.provider || !gasWallet.address) return;
-    
-    console.log("Attempting to fetch transaction history");
-    
-    // Don't show loading indicator if we already have transactions
-    if (transactions.length === 0) {
-      setIsLoadingTransactions(true);
+    // Skip if already fetching, offline, or no wallet
+    if (fetchInProgressRef.current || networkStatus === 'offline' || !mainWallet.provider || !gasWallet.address) {
+      return;
     }
+    
+    // Mark as in progress briefly
+    fetchInProgressRef.current = true;
     
     try {
-      // Specify a smaller block count for faster loading
-      const blockCount = 100;
+      // Clean up pending transactions older than 10 minutes (they probably failed)
+      const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
       
-      // Fetch confirmed transactions from blockchain
-      console.log("Fetching with address:", gasWallet.address);
-      const confirmedTxs = await fetchTransactionsFromBlockchain(
-        mainWallet.provider, gasWallet.address, blockCount
-      );
-      
-      console.log("Received confirmed transactions:", confirmedTxs);
-      
-      // Get pending transactions (ones in our local state that haven't been confirmed yet)
-      const pendingTxs = transactions.filter(tx => tx.status === 'pending');
-      
-      // Filter out any pending transactions that match confirmed ones
-      const confirmedTxHashes = new Set(confirmedTxs.map(tx => tx.txHash));
-      const filteredPendingTxs = pendingTxs.filter(tx => 
-        !tx.txHash || !confirmedTxHashes.has(tx.txHash)
-      );
-      
-      // Combine pending and confirmed transactions
-      const combinedTxs = [...filteredPendingTxs, ...confirmedTxs];
-      
-      // Only keep the most recent 20 transactions
-      const limitedTxs = combinedTxs.slice(0, 20);
-      
-      console.log("Setting transactions:", limitedTxs);
-      
-      // Update transaction list
-      setTransactions(limitedTxs);
-      
-      // Remember that we just updated
-      lastTxUpdateRef.current = Date.now();
+      setTransactions(prev => {
+        // Filter out old pending transactions
+        const filtered = prev.filter(tx => 
+          tx.status !== 'pending' || new Date(tx.timestamp).getTime() > tenMinutesAgo
+        );
+        
+        // If nothing changed, return the same array
+        if (filtered.length === prev.length) return prev;
+        
+        return filtered;
+      });
     } catch (error) {
-      console.error("Error fetching transaction history:", error);
+      // Silent error handling
     } finally {
-      setIsLoadingTransactions(false);
+      fetchInProgressRef.current = false;
     }
-  }, [mainWallet.provider, gasWallet.address, transactions, networkStatus]);
+  }, [mainWallet.provider, gasWallet.address, networkStatus]);
   
   // Add a transaction to the queue
   const queueTransaction = useCallback((type, id, details = {}) => {
@@ -164,8 +146,6 @@ export const TransactionProvider = ({ children }) => {
     });
     
     // Decrement processing count when done
-    // This would normally contain transaction processing logic
-    // but we've moved that to the GameContext directly
     setTimeout(() => {
       setProcessingTxCount(prev => Math.max(0, prev - 1));
     }, 1000);
@@ -184,62 +164,23 @@ export const TransactionProvider = ({ children }) => {
     return () => clearInterval(processorId);
   }, [networkStatus, txQueue, processingTxCount, processNextTransaction]);
   
-  // Initial transaction fetch with throttling
+  // Periodic cleanup of old pending transactions
   useEffect(() => {
     if (mainWallet.provider && gasWallet.address) {
-      console.log("Setting up transaction history fetching");
-      
-      // Initial fetch - just once
-      let initialFetchDone = false;
-      const initialFetchTimeout = setTimeout(() => {
-        if (!initialFetchDone) {
-          initialFetchDone = true;
-          fetchTransactionHistory(true);
-        }
-      }, 2000);
-      
-      // Periodic fetch with proper throttling
-      let lastFetchTime = 0;
-      const FETCH_COOLDOWN = 10000; // 10 seconds between fetches minimum
-      
-      const refreshInterval = setInterval(() => {
-        const now = Date.now();
-        // Only fetch if enough time has passed AND tab is visible
-        if (document.visibilityState === 'visible' && now - lastFetchTime > FETCH_COOLDOWN) {
-          lastFetchTime = now;
+      const cleanupInterval = setInterval(() => {
+        if (document.visibilityState === 'visible') {
           fetchTransactionHistory(false);
         }
-      }, 15000); // Check every 15 seconds, but respect the cooldown
+      }, 60000); // Run cleanup every minute
       
-      return () => {
-        clearTimeout(initialFetchTimeout);
-        clearInterval(refreshInterval);
-      };
+      return () => clearInterval(cleanupInterval);
     }
-  }, [mainWallet.provider, gasWallet.address]);
+  }, [mainWallet.provider, gasWallet.address, fetchTransactionHistory]);
   
-  // Periodic transaction refresh
-  useEffect(() => {
+  // Manual refresh - just cleans up old pending transactions, doesn't fetch from blockchain
+  const manualRefresh = useCallback(() => {
     if (mainWallet.provider && gasWallet.address) {
-      const refreshInterval = setInterval(() => {
-        if (document.visibilityState === 'visible') {
-          fetchTransactionHistory(false);
-        }
-      }, 30000); // 30 seconds
-      
-      // Fetch on visibility change
-      const handleVisibilityChange = () => {
-        if (document.visibilityState === 'visible') {
-          fetchTransactionHistory(false);
-        }
-      };
-      
-      document.addEventListener('visibilitychange', handleVisibilityChange);
-      
-      return () => {
-        clearInterval(refreshInterval);
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-      };
+      fetchTransactionHistory(true);
     }
   }, [mainWallet.provider, gasWallet.address, fetchTransactionHistory]);
   
@@ -247,11 +188,13 @@ export const TransactionProvider = ({ children }) => {
   const contextValue = {
     transactions,
     isLoadingTransactions,
+    hasInitiallyLoaded,
+    loadError,
     processingTxCount,
     queueLength: txQueue.length,
     addPendingTransaction,
     updateTransaction,
-    fetchTransactionHistory,
+    fetchTransactionHistory: manualRefresh,
     queueTransaction
   };
   
