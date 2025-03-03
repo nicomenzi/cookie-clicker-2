@@ -1,6 +1,6 @@
 // src/services/TransactionService.js
 import { ethers } from 'ethers';
-import { getCookieClickerContract, getCookieTokenContract, getTokenDecimals } from './ContractService';
+import { getCookieClickerContract, getCookieTokenContract } from './ContractService';
 import { COOKIE_TOKEN_ADDRESS, COOKIE_CLICKER_ADDRESS, COOKIE_CLICKER_ABI } from '../constants/contracts';
 import { MONAD_TESTNET } from '../constants/blockchain';
 import apiManager from './ApiManager';
@@ -127,7 +127,7 @@ export const fundClickerContract = async (signer, amount) => {
   try {
     // First, get token contract with the user's signer
     const tokenWithSigner = getCookieTokenContract(signer);
-    const decimals = await getTokenDecimals(signer.provider);
+    const decimals = 18
     
     // Convert amount to token units
     const tokenAmount = ethers.utils.parseUnits(amount.toString(), decimals);

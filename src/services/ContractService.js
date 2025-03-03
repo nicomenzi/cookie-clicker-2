@@ -88,53 +88,6 @@ export const getCookieTokenContract = (signerOrProvider, rpcUrl) => {
 };
 
 /**
- * Get token decimals with caching
- * @param {ethers.providers.Provider} provider - Ethereum provider
- * @returns {Promise<number>} - Token decimals
- */
-export const getTokenDecimals = async (provider) => {
-  // Use cache if available
-  if (contractDecimals !== null) {
-    console.log("Using cached token decimals:", contractDecimals);
-    return contractDecimals;
-  }
-  
-  // Use API manager for rate-limited request
-  return apiManager.request(async (rpcUrl) => {
-    if (!provider) {
-      console.log("No provider provided, getting new provider...");
-      provider = getProvider(rpcUrl);
-    }
-    
-    try {
-      console.log("Getting token contract for decimals...");
-      const contract = getCookieTokenContract(provider, rpcUrl);
-      console.log("Got token contract for decimals, calling decimals()...");
-      
-      // Add timeout to decimals call
-      const decimalsPromise = contract.decimals();
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Decimals call timed out')), 10000)
-      );
-      
-      const decimals = await Promise.race([decimalsPromise, timeoutPromise]);
-      console.log("Raw decimals from contract:", decimals);
-      contractDecimals = decimals;
-      return decimals;
-    } catch (error) {
-      console.error("Detailed error getting token decimals:", {
-        message: error.message,
-        code: error.code,
-        stack: error.stack,
-        provider: provider ? 'exists' : 'missing',
-        providerNetwork: provider ? await provider.getNetwork().catch(() => 'unknown') : 'none'
-      });
-      return 18; // Default to 18 on error
-    }
-  }, 'token-decimals', 3600000); // Cache for 1 hour
-};
-
-/**
  * Check if the CookieClicker contract has tokens to distribute with caching
  * @param {ethers.providers.Provider} provider - Ethereum provider
  * @returns {Promise<boolean>} - True if contract has tokens
@@ -260,32 +213,46 @@ export const getTokenBalance = async (provider, address) => {
       console.log("Got token contract instance");
       
       console.log("Getting token decimals...");
-      const decimals = await getTokenDecimals(provider);
+      const decimals = 18
       console.log("Got token decimals:", decimals);
       
       console.log("Calling balanceOf...");
-      // Add timeout to balanceOf call
-      const balancePromise = contract.balanceOf(address);
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('BalanceOf call timed out')), 10000)
-      );
       
-      const balance = await Promise.race([balancePromise, timeoutPromise]);
+      // Try a direct approach first instead of using Promise.race with timeout
+      const balance = await contract.balanceOf(address);
       console.log("Raw balance from contract:", balance.toString());
       
       const formattedBalance = ethers.utils.formatUnits(balance, decimals);
       console.log(`Retrieved token balance: ${formattedBalance} $COOKIE`);
       return formattedBalance;
     } catch (error) {
-      console.error("Detailed error getting token balance:", {
-        message: error.message,
-        code: error.code,
-        stack: error.stack,
-        provider: provider ? 'exists' : 'missing',
-        address: address,
-        providerNetwork: provider ? await provider.getNetwork().catch(() => 'unknown') : 'none'
-      });
-      return "0";
+      console.error("Error getting token balance:", error.message);
+      
+      // Try with a different provider before giving up
+      try {
+        console.log("Trying backup provider for token balance...");
+        const backupProvider = new ethers.providers.JsonRpcProvider(
+          "https://monad-testnet.g.alchemy.com/v2/488IcywoV_kXnNsIorSEew1H3e2AujuY"
+        );
+        
+        const backupContract = new ethers.Contract(
+          COOKIE_TOKEN_ADDRESS,
+          COOKIE_TOKEN_ABI,
+          backupProvider
+        );
+        
+        // For simplicity, just use 18 as default decimals for backup attempt
+        const backupBalance = await backupContract.balanceOf(address);
+        const backupFormatted = ethers.utils.formatUnits(backupBalance, 18);
+        console.log(`Retrieved backup token balance: ${backupFormatted} $COOKIE`);
+        return backupFormatted;
+      } catch (backupError) {
+        console.error("Both primary and backup balance checks failed:", backupError.message);
+        
+        // Throw the error instead of silently returning "0"
+        // This makes the issue visible instead of hiding it
+        throw new Error(`Failed to get token balance: ${error.message}`);
+      }
     }
   }, `token-balance:${address}`, 10000, { priority: 'high' }); // Cache for only 10 seconds, highest priority
 };
