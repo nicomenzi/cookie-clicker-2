@@ -1,11 +1,11 @@
-// src/context/WalletContext.jsx (corrected approach)
+// src/context/WalletContext.jsx
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { ethers } from 'ethers';
-import { connectWallet } from '../services/blockchain';
-import { PersistentMonadGasWallet } from '../services/persistentWallet';
+import { connectWallet } from '../services/WalletService';
+import { PersistentGasWallet } from '../services/WalletService';
 import { MONAD_TESTNET } from '../constants/blockchain'; 
 
-const WalletContext = createContext();
+export const WalletContext = createContext();
 
 export const useWalletContext = () => useContext(WalletContext);
 
@@ -40,8 +40,6 @@ export const WalletProvider = ({ children }) => {
       );
       
       // Update main wallet state
-      // - Use original provider/signer for transactions (writing)
-      // - Use Alchemy provider for read operations in other components
       setMainWallet({
         connected: true,
         address,
@@ -49,7 +47,7 @@ export const WalletProvider = ({ children }) => {
         signer, // Keep original signer for transactions
       });
       
-      // Initialize gas wallet with Alchemy provider for better rate limits
+      // Initialize gas wallet with Alchemy provider
       await initializeGasWallet(alchemyProvider, address, signer);
     } catch (error) {
       console.error("Error connecting wallet:", error);
@@ -62,7 +60,7 @@ export const WalletProvider = ({ children }) => {
   // Initialize gas wallet
   const initializeGasWallet = async (provider, userAddress, signer) => {
     try {
-      const wallet = new PersistentMonadGasWallet(provider);
+      const wallet = new PersistentGasWallet(provider);
       const address = await wallet.create(userAddress, signer);
       
       setGasWallet({
@@ -143,6 +141,19 @@ export const WalletProvider = ({ children }) => {
     
     checkConnection();
   }, []);
+  
+  // Periodically update gas wallet balance
+  useEffect(() => {
+    if (gasWallet.instance) {
+      const intervalId = setInterval(() => {
+        if (document.visibilityState === 'visible') {
+          updateGasWalletBalance();
+        }
+      }, 30000); // 30 seconds
+      
+      return () => clearInterval(intervalId);
+    }
+  }, [gasWallet.instance]);
   
   return (
     <WalletContext.Provider value={{

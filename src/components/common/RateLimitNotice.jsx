@@ -28,16 +28,16 @@ const RateLimitNotice = () => {
       
       <div className="flex items-start mb-2">
         <AlertTriangle size={18} className="text-yellow-600 mr-2 mt-0.5" />
-        <h3 className="font-bold text-yellow-700">Alchemy API Rate Limits</h3>
+        <h3 className="font-bold text-yellow-700">API Rate Limiting</h3>
       </div>
       
       <p className="text-sm text-yellow-700 mb-2">
-        Alchemy may enforce rate limits on the API. If you click too fast, 
-        some transactions might be delayed or queued.
+        This app uses rate limiting to stay within the Monad testnet limits of 10 req/sec.
+        9 req/sec are allocated for transactions and 1 req/sec for data updates.
       </p>
       
       <p className="text-xs text-yellow-600">
-        This game now uses a rate-limited queue to manage transactions within these limits.
+        Some actions might be queued if you click too fast, but they'll process in order.
       </p>
     </div>
   );

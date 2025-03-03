@@ -1,10 +1,10 @@
 // src/components/common/QueueIndicator.jsx
 import React from 'react';
-import { useGameContext } from '../../context/GameContext';
+import { useTransactionContext } from '../../context/TransactionContext';
 import { Clock } from 'lucide-react';
 
 const QueueIndicator = () => {
-  const { queueLength, processingTxCount } = useGameContext();
+  const { queueLength, processingTxCount } = useTransactionContext();
   
   // Only show when there are items in the queue
   if (queueLength === 0 && processingTxCount === 0) {
