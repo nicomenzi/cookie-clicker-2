@@ -7,9 +7,10 @@ export const MONAD_TESTNET = {
     symbol: "MON",
     decimals: 18,
   },
-  // Primary RPC URL with high request limit
+  // Updated to use the requested RPC URL
   rpcUrls: [
-    "https://testnet-rpc.monad.xyz/" // Primary RPC with 10 req/sec limit
+    "https://testnet-rpc.monad.xyz/",
+    "https://monad-testnet.g.alchemy.com/v2/488IcywoV_kXnNsIorSEew1H3e2AujuY" // Keep Alchemy as backup
   ],
   blockExplorerUrls: ["https://testnet.monadexplorer.com/"],
 };

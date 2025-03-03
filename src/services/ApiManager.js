@@ -1,24 +1,34 @@
 // src/services/ApiManager.js
 /**
  * Unified API manager that handles:
- * - Rate limiting
+ * - Rate limiting with 10 req/s total limit (9 for TX, 1 for data)
  * - Request queueing and prioritization
  * - Caching
  * - Activity tracking
  */
 class ApiManager {
   constructor() {
-    // Rate limiting configuration - optimized for Monad testnet RPC
+    // Rate limiting configuration - split transactions and data
     this.rateLimits = {
-      monadRPC: {
+      transaction: {
         requestTimeWindow: 1000, // 1 second window
-        maxRequestsPerWindow: 9, // 9 req/sec for transactions (leaving 1 for data)
+        maxRequestsPerWindow: 9, // 9 req/sec for transactions
+        requestTimestamps: []
+      },
+      data: {
+        requestTimeWindow: 1000, // 1 second window
+        maxRequestsPerWindow: 1, // 1 req/sec for data queries
         requestTimestamps: []
       }
     };
     
-    // Current provider
-    this.currentProvider = 'monadRPC';
+    // Provider config - now using Monad direct RPC
+    this.rpcUrls = {
+      primary: "https://testnet-rpc.monad.xyz/",
+      backup: "https://monad-testnet.g.alchemy.com/v2/488IcywoV_kXnNsIorSEew1H3e2AujuY"
+    };
+    
+    this.currentRpcUrl = this.rpcUrls.primary;
     
     // Request queues by priority
     this.queues = {
@@ -35,22 +45,25 @@ class ApiManager {
     // Processing state
     this.isProcessing = false;
     this.processingTimer = null;
+    this.isProcessingTx = false;
+    this.processingTxTimer = null;
     
-    // Default refresh intervals - longer intervals to reduce API usage
+    // Default refresh intervals
     this.refreshIntervals = {
-      playerScore: 5 * 60 * 1000,      // 5 minutes
-      redeemableTokens: 10 * 60 * 1000, // 10 minutes
-      cookieBalance: 5 * 60 * 1000,    // 5 minutes
-      contractHasTokens: 10 * 60 * 1000, // 10 minutes
-      clicksPerToken: 30 * 60 * 1000,  // 30 minutes
-      transactionHistory: 0 // 0 = disabled
+      playerScore: 20 * 1000,            // 20 seconds
+      redeemableTokens: 30 * 1000,       // 30 seconds
+      cookieBalance: 30 * 1000,          // 30 seconds
+      contractHasTokens: 5 * 60 * 1000,  // 5 minutes
+      clicksPerToken: 10 * 60 * 1000,    // 10 minutes
+      transactionHistory: 10 * 60 * 1000 // 10 minutes
     };
     
     // Default cache TTL settings
     this.defaultTTLs = {
-      'balance': 60000,         // Balance: 1 minute
-      'token-balance': 120000,   // Token balance: 2 minutes
-      'contract-config': 600000 // Contract configuration: 10 minutes
+      'balance': 30000,         // Balance: 30 seconds
+      'token-balance': 30000,   // Token balance: 30 seconds
+      'player-score': 20000,    // Player score: 20 seconds
+      'contract-config': 300000 // Contract configuration: 5 minutes
     };
     
     // Activity tracking
@@ -64,6 +77,14 @@ class ApiManager {
     this.errorCount = 0;
     this.lastErrorTime = 0;
     this.backoffTime = 1000; // Start with 1s backoff
+    
+    // Request stats for monitoring
+    this.stats = {
+      txRequests: 0,
+      dataRequests: 0,
+      errors: 0,
+      rateExceeded: 0
+    };
     
     // Start processing
     this.startProcessing();
@@ -123,6 +144,11 @@ class ApiManager {
       clearTimeout(this.processingTimer);
       this.processingTimer = null;
     }
+    
+    if (this.processingTxTimer) {
+      clearTimeout(this.processingTxTimer);
+      this.processingTxTimer = null;
+    }
   }
   
   /**
@@ -135,25 +161,45 @@ class ApiManager {
   }
   
   /**
-   * Start the request processing loop
+   * Start the request processing loop with separate transaction and data processing
    */
   startProcessing() {
+    // Clear any existing timers
     if (this.processingTimer) {
       clearTimeout(this.processingTimer);
     }
     
-    const processLoop = () => {
+    if (this.processingTxTimer) {
+      clearTimeout(this.processingTxTimer);
+    }
+    
+    // Transaction processing loop - faster to prioritize transactions
+    const processTxLoop = () => {
       if (this.isInBackground) {
         // Don't process when tab is hidden
-        this.processingTimer = setTimeout(processLoop, 1000);
+        this.processingTxTimer = setTimeout(processTxLoop, 1000);
         return;
       }
       
-      this.processNextRequest();
-      this.processingTimer = setTimeout(processLoop, 100); // Check queue every 100ms
+      this.processNextTransaction();
+      this.processingTxTimer = setTimeout(processTxLoop, 110); // ~9 tx per second
     };
     
-    this.processingTimer = setTimeout(processLoop, 100);
+    // Data processing loop - slower to limit to ~1 req/sec
+    const processDataLoop = () => {
+      if (this.isInBackground) {
+        // Don't process when tab is hidden
+        this.processingTimer = setTimeout(processDataLoop, 1000);
+        return;
+      }
+      
+      this.processNextDataRequest();
+      this.processingTimer = setTimeout(processDataLoop, 1000); // 1 data request per second
+    };
+    
+    // Start both loops
+    this.processingTxTimer = setTimeout(processTxLoop, 100);
+    this.processingTimer = setTimeout(processDataLoop, 200);
   }
   
   /**
@@ -164,18 +210,23 @@ class ApiManager {
       clearTimeout(this.processingTimer);
       this.processingTimer = null;
     }
+    
+    if (this.processingTxTimer) {
+      clearTimeout(this.processingTxTimer);
+      this.processingTxTimer = null;
+    }
   }
   
   // --- Rate limiting ---
   
   /**
    * Check if we can make a request based on rate limits
-   * @param {string} provider - The provider to check
+   * @param {string} requestType - 'transaction' or 'data'
    * @returns {boolean} True if we can make a request
    */
-  canMakeRequest(provider = this.currentProvider) {
+  canMakeRequest(requestType = 'data') {
     const now = Date.now();
-    const limits = this.rateLimits[provider];
+    const limits = this.rateLimits[requestType];
     
     // Clean up old request timestamps
     limits.requestTimestamps = limits.requestTimestamps.filter(
@@ -188,40 +239,56 @@ class ApiManager {
   
   /**
    * Record that a request was made
-   * @param {string} provider - The provider that was used
+   * @param {string} requestType - 'transaction' or 'data'
    */
-  recordRequest(provider = this.currentProvider) {
-    this.rateLimits[provider].requestTimestamps.push(Date.now());
+  recordRequest(requestType = 'data') {
+    this.rateLimits[requestType].requestTimestamps.push(Date.now());
+    
+    // Update stats
+    if (requestType === 'transaction') {
+      this.stats.txRequests++;
+    } else {
+      this.stats.dataRequests++;
+    }
   }
   
   /**
    * Calculate time to wait before next request
-   * @param {string} provider - The provider to check
+   * @param {string} requestType - 'transaction' or 'data'
    * @returns {number} Milliseconds to wait
    */
-  getTimeToWait(provider = this.currentProvider) {
-    if (this.canMakeRequest(provider)) {
+  getTimeToWait(requestType = 'data') {
+    if (this.canMakeRequest(requestType)) {
       return 0;
     }
     
     const now = Date.now();
-    const limits = this.rateLimits[provider];
+    const limits = this.rateLimits[requestType];
     const oldestRequest = limits.requestTimestamps[0];
     return limits.requestTimeWindow - (now - oldestRequest) + 50; // Add 50ms buffer
+  }
+  
+  /**
+   * Switch to backup RPC if needed
+   */
+  switchToBackupRpcIfNeeded() {
+    if (this.currentRpcUrl === this.rpcUrls.primary) {
+      console.log('Switching to backup RPC URL due to rate limits or errors');
+      this.currentRpcUrl = this.rpcUrls.backup;
+      setTimeout(() => {
+        // Switch back after 10 seconds
+        this.currentRpcUrl = this.rpcUrls.primary;
+      }, 10000);
+    }
   }
   
   // --- Request processing ---
   
   /**
-   * Get the next request from queues based on priority
+   * Get the next data request (non-transaction)
    */
-  getNextRequest() {
-    // Transactions are highest priority
-    if (this.queues.transaction.length > 0) {
-      return this.queues.transaction.shift();
-    }
-    
-    // Then high priority items
+  getNextDataRequest() {
+    // High priority data items first
     if (this.queues.high.length > 0) {
       return this.queues.high.shift();
     }
@@ -240,32 +307,29 @@ class ApiManager {
   }
   
   /**
-   * Process the next request in the queue
+   * Process next data request in queue
+   * @private
    */
-  async processNextRequest() {
+  async processNextDataRequest() {
     if (this.isProcessing) return;
     
     // Check backoff due to errors
     const backoffTime = this.getBackoffTime();
     if (backoffTime > 0) {
-      setTimeout(() => this.processNextRequest(), backoffTime);
+      setTimeout(() => this.processNextDataRequest(), backoffTime);
       return;
     }
     
-    // Get next request
-    const nextRequest = this.getNextRequest();
+    // Get next data request
+    const nextRequest = this.getNextDataRequest();
     if (!nextRequest) return;
     
-    // Handle transaction requests specially
-    if (nextRequest.isTransaction) {
-      this.processTransactionRequest(nextRequest);
-      return;
-    }
-    
     // Check rate limits
-    if (!this.canMakeRequest()) {
-      const timeToWait = this.getTimeToWait();
-      setTimeout(() => this.processNextRequest(), timeToWait);
+    if (!this.canMakeRequest('data')) {
+      this.stats.rateExceeded++;
+      console.log('Data rate limit hit, waiting before next request');
+      const timeToWait = this.getTimeToWait('data');
+      setTimeout(() => this.processNextDataRequest(), timeToWait);
       return;
     }
     
@@ -273,50 +337,129 @@ class ApiManager {
     this.isProcessing = true;
     
     try {
-      // Record this request
-      this.recordRequest();
+      console.log(`Processing request: ${nextRequest.cacheKey || 'uncached request'}`);
       
-      // Execute the request
-      const result = await nextRequest.fn();
-      
-      // Cache if requested
-      if (nextRequest.cacheKey) {
-        this.cache.set(nextRequest.cacheKey, result);
-        this.cacheTTL.set(
-          nextRequest.cacheKey,
-          Date.now() + (nextRequest.cacheTTL || this.getDefaultTTL(nextRequest.cacheKey))
-        );
+      // Try primary RPC first
+      let result;
+      try {
+        result = await nextRequest.fn(this.rpcUrls.primary);
+      } catch (primaryError) {
+        console.warn('Primary RPC failed, trying backup:', primaryError);
+        // Try backup RPC
+        result = await nextRequest.fn(this.rpcUrls.backup);
       }
       
-      // Resolve the promise
+      // Cache the result if needed
+      if (nextRequest.cacheKey) {
+        const ttl = nextRequest.cacheTTL || this.getDefaultTTL(nextRequest.cacheKey);
+        this.cache.set(nextRequest.cacheKey, result);
+        this.cacheTTL.set(nextRequest.cacheKey, Date.now() + ttl);
+      }
+      
+      // Record the successful request
+      this.recordRequest('data');
+      
+      // Reset error tracking on success
+      this.errorCount = 0;
+      this.backoffTime = 1000;
+      
       nextRequest.resolve(result);
     } catch (error) {
-      // Record error for backoff
-      this.recordError(error);
+      console.error('Request failed:', {
+        key: nextRequest.cacheKey,
+        error: error.message,
+        code: error.code,
+        stack: error.stack
+      });
+      
+      // Increment error count and update backoff
+      this.errorCount++;
+      this.lastErrorTime = Date.now();
+      this.backoffTime = Math.min(this.backoffTime * 2, 30000); // Max 30s backoff
+      
+      if (nextRequest.retries < nextRequest.maxRetries) {
+        console.log(`Retrying request (${nextRequest.retries + 1}/${nextRequest.maxRetries})`);
+        nextRequest.retries++;
+        this.addToQueue(nextRequest);
+      } else {
+        nextRequest.reject(error);
+      }
+      
+      this.stats.errors++;
+    } finally {
+      this.isProcessing = false;
+      
+      // Schedule next request
+      const nextTime = Math.max(
+        this.getTimeToWait('data'),
+        this.getBackoffTime()
+      );
+      
+      setTimeout(() => this.processNextDataRequest(), nextTime);
+    }
+  }
+  
+  /**
+   * Process the next transaction in the queue (9 req/s)
+   */
+  async processNextTransaction() {
+    if (this.isProcessingTx) return;
+    
+    // Skip if there are no transactions to process
+    if (this.queues.transaction.length === 0) return;
+    
+    // Check rate limits for transactions
+    if (!this.canMakeRequest('transaction')) {
+      this.stats.rateExceeded++;
+      console.log('Transaction rate limit hit, waiting before next transaction');
+      const timeToWait = this.getTimeToWait('transaction');
+      return; // The loop will check again later
+    }
+    
+    // Get next transaction
+    const nextTransaction = this.queues.transaction.shift();
+    
+    // Process the transaction
+    this.isProcessingTx = true;
+    
+    try {
+      // Record this transaction request
+      this.recordRequest('transaction');
+      
+      // Execute the transaction
+      const result = await nextTransaction.fn(this.currentRpcUrl);
+      
+      // Resolve the promise
+      nextTransaction.resolve(result);
+    } catch (error) {
+      console.error('Transaction error:', error);
+      this.stats.errors++;
       
       // Handle rate limit errors
       if (error?.message?.includes('429') || 
           error?.message?.includes('rate limit') ||
           error?.message?.includes('requests limited')) {
         
+        this.switchToBackupRpcIfNeeded();
+        
         // Requeue with backoff if retries remain
-        if (nextRequest.retries < nextRequest.maxRetries) {
-          nextRequest.retries++;
+        if (nextTransaction.retries < nextTransaction.maxRetries) {
+          nextTransaction.retries++;
           // Use exponential backoff
-          const backoffTime = Math.pow(1.5, nextRequest.retries) * 1000;
+          const backoffTime = Math.pow(1.5, nextTransaction.retries) * 1000;
           
           setTimeout(() => {
-            this.addToQueue(nextRequest);
+            this.queues.transaction.push(nextTransaction);
           }, backoffTime);
         } else {
-          nextRequest.reject(error);
+          nextTransaction.reject(error);
         }
       } else {
         // For other errors, reject immediately
-        nextRequest.reject(error);
+        nextTransaction.reject(error);
       }
     } finally {
-      this.isProcessing = false;
+      this.isProcessingTx = false;
     }
   }
   
@@ -339,60 +482,6 @@ class ApiManager {
         break;
       default:
         this.queues.normal.push(request);
-    }
-  }
-  
-  /**
-   * Process a transaction request - with special handling to ensure it goes through
-   * @param {Object} request - The transaction request
-   */
-  async processTransactionRequest(request) {
-    this.isProcessing = true;
-    
-    try {
-      // Check rate limits
-      if (!this.canMakeRequest()) {
-        const timeToWait = this.getTimeToWait();
-        
-        // For transactions, we always queue them if rate limit hit
-        setTimeout(() => {
-          this.addToQueue(request);
-        }, timeToWait);
-        
-        this.isProcessing = false;
-        return;
-      }
-      
-      // Record this request
-      this.recordRequest();
-      
-      // Execute the transaction request
-      const result = await request.fn();
-      request.resolve(result);
-    } catch (error) {
-      // Handle rate limit errors
-      if (error?.message?.includes('429') || 
-          error?.message?.includes('rate limit') ||
-          error?.message?.includes('requests limited')) {
-        
-        // Requeue with backoff if retries remain
-        if (request.retries < request.maxRetries) {
-          request.retries++;
-          // Use exponential backoff
-          const backoffTime = Math.pow(2, request.retries) * 1000;
-          
-          setTimeout(() => {
-            this.addToQueue(request);
-          }, backoffTime);
-        } else {
-          request.reject(error);
-        }
-      } else {
-        // Not a rate limit error, just reject
-        request.reject(error);
-      }
-    } finally {
-      this.isProcessing = false;
     }
   }
   
@@ -431,9 +520,14 @@ class ApiManager {
                       error?.message?.includes('rate limit') || 
                       error?.message?.includes('requests limited');
                       
+    // For rate limit errors, switch providers
     if (isRateLimit) {
-      // More aggressive backoff for rate limits
-      this.backoffTime = Math.min(10000, this.backoffTime * 2);
+      console.warn(`Rate limit hit on ${this.currentRpcUrl}!`);
+      
+      this.switchToBackupRpcIfNeeded();
+      
+      // Use a more modest backoff for rate limits since we switched providers
+      this.backoffTime = Math.min(5000, this.backoffTime * 1.5);
     } else {
       // Increase backoff time (max 30 seconds) for other errors
       this.backoffTime = Math.min(30000, Math.pow(2, Math.min(4, this.errorCount)) * 1000);
@@ -453,6 +547,7 @@ class ApiManager {
   request(requestFn, cacheKey = null, cacheTTL = null, options = {}) {
     const priority = options.priority || 'normal';
     const maxRetries = options.maxRetries !== undefined ? options.maxRetries : 3;
+    const isTransaction = options.isTransaction || false;
     
     // Check cache first
     if (cacheKey && this.cache.has(cacheKey)) {
@@ -473,7 +568,7 @@ class ApiManager {
         cacheKey,
         cacheTTL,
         priority,
-        isTransaction: options.isTransaction || false,
+        isTransaction,
         resolve,
         reject,
         retries: 0,
@@ -494,7 +589,7 @@ class ApiManager {
     return this.request(txFn, null, null, {
       priority: 'high',
       isTransaction: true,
-      maxRetries: 5 // More retries for transactions
+      maxRetries: 2
     });
   }
   
@@ -571,7 +666,7 @@ class ApiManager {
   // --- Data refresh management ---
   
   /**
-   * Check if a data type should be refreshed
+   * Check if a data type should be refreshed - drastically reduced frequency
    * @param {string} dataType - The data type to check
    * @param {boolean} [forceRefresh=false] - Force a refresh regardless of time
    * @returns {boolean} - True if data should be refreshed
@@ -580,23 +675,20 @@ class ApiManager {
     // Always refresh if forced
     if (forceRefresh) return true;
     
-    // Skip if disabled (0 interval)
-    if (this.refreshIntervals[dataType] === 0) return false;
-    
-    // When page is hidden, block almost all requests
+    // When page is hidden, block all requests
     if (this.isInBackground) {
       return false;
     }
     
     // If user is inactive, use much longer refresh intervals
-    const inactivityMultiplier = this.isUserActive ? 1 : 5;
+    const inactivityMultiplier = this.isUserActive ? 1 : 10;
     
     // Get last update time
     const lastUpdate = this.lastUpdated?.get(dataType) || 0;
     const now = Date.now();
     
     // Get refresh interval (with inactivity multiplier)
-    const interval = (this.refreshIntervals[dataType] || 60000) * inactivityMultiplier;
+    const interval = (this.refreshIntervals[dataType] || 300000) * inactivityMultiplier;
     
     // Only refresh if enough time has passed
     return (now - lastUpdate) >= interval;
@@ -612,80 +704,53 @@ class ApiManager {
   }
   
   /**
-   * Get cached data
-   * @param {string} dataType - The data type to get
-   * @param {string} [key='default'] - Optional key for multiple entries of the same type
-   * @returns {any} - The cached data or undefined if not found
+   * Get current API stats
+   * @returns {Object} - Usage statistics
    */
-  getCachedData(dataType, key = 'default') {
-    const fullKey = `${dataType}:${key}`;
-    return this.cache.get(fullKey);
-  }
-  
-  /**
-   * Set cached data
-   * @param {string} dataType - The data type to set
-   * @param {any} data - The data to cache
-   * @param {string} [key='default'] - Optional key for multiple entries of the same type
-   */
-  setCachedData(dataType, data, key = 'default') {
-    const fullKey = `${dataType}:${key}`;
-    this.cache.set(fullKey, data);
-    this.recordRefresh(dataType);
-  }
-  
-  /**
-   * Clear cached data for a data type
-   * @param {string} dataType - The data type to clear
-   * @param {string} [key] - Optional specific key to clear
-   */
-  clearCachedData(dataType, key) {
-    if (key) {
-      const fullKey = `${dataType}:${key}`;
-      this.cache.delete(fullKey);
-    } else {
-      // Clear all entries for this data type
-      for (const cacheKey of this.cache.keys()) {
-        if (cacheKey.startsWith(`${dataType}:`)) {
-          this.cache.delete(cacheKey);
-        }
-      }
-    }
-  }
-  
-  /**
-   * Set minimal refresh intervals for reduced API usage
-   * @param {boolean} minimal - Whether to use minimal intervals
-   */
-  setMinimalMode(minimal) {
-    if (minimal) {
-      // Ultra-minimal refresh for reduced API usage
-      this.refreshIntervals = {
-        playerScore: 10 * 60 * 1000,      // 10 minutes
-        redeemableTokens: 15 * 60 * 1000, // 15 minutes
-        cookieBalance: 10 * 60 * 1000,    // 10 minutes
-        contractHasTokens: 15 * 60 * 1000, // 15 minutes
-        clicksPerToken: 60 * 60 * 1000,   // 60 minutes
-        transactionHistory: 0 // Disabled
-      };
-    } else {
-      // Reset to normal intervals (still conservative)
-      this.refreshIntervals = {
-        playerScore: 5 * 60 * 1000,      // 5 minutes
-        redeemableTokens: 10 * 60 * 1000, // 10 minutes
-        cookieBalance: 5 * 60 * 1000,    // 5 minutes
-        contractHasTokens: 10 * 60 * 1000, // 10 minutes
-        clicksPerToken: 30 * 60 * 1000,  // 30 minutes
-        transactionHistory: 0 // Disabled
-      };
-    }
+  getStats() {
+    return {
+      ...this.stats,
+      queueLengths: {
+        transaction: this.queues.transaction.length,
+        high: this.queues.high.length,
+        normal: this.queues.normal.length,
+        low: this.queues.low.length
+      },
+      cacheSize: this.cache.size,
+      currentProvider: this.currentRpcUrl
+    };
   }
 }
 
 // Create singleton instance
 const apiManager = new ApiManager();
 
-// Start in minimal mode to dramatically reduce API calls
+// Set minimal mode to balance API usage and data freshness
+apiManager.setMinimalMode = function(minimal) {
+  if (minimal) {
+    // Balanced refresh intervals - still update critical data frequently
+    this.refreshIntervals = {
+      playerScore: 30 * 1000,            // 30 seconds
+      redeemableTokens: 45 * 1000,       // 45 seconds
+      cookieBalance: 45 * 1000,          // 45 seconds
+      contractHasTokens: 5 * 60 * 1000,  // 5 minutes
+      clicksPerToken: 10 * 60 * 1000,    // 10 minutes
+      transactionHistory: 10 * 60 * 1000 // 10 minutes
+    };
+  } else {
+    // Standard intervals - more frequent updates
+    this.refreshIntervals = {
+      playerScore: 20 * 1000,            // 20 seconds
+      redeemableTokens: 30 * 1000,       // 30 seconds
+      cookieBalance: 30 * 1000,          // 30 seconds
+      contractHasTokens: 5 * 60 * 1000,  // 5 minutes
+      clicksPerToken: 10 * 60 * 1000,    // 10 minutes
+      transactionHistory: 10 * 60 * 1000 // 10 minutes
+    };
+  }
+};
+
+// Start in minimal mode
 apiManager.setMinimalMode(true);
 
 export default apiManager;

@@ -3,7 +3,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useGameContext } from '../../context/GameContext';
 import { useWalletContext } from '../../context/WalletContext';
 import { useTransactionContext } from '../../context/TransactionContext';
-import { AlertCircle, Clock, Activity } from 'lucide-react';
+import { AlertCircle, Clock, Activity, RefreshCw } from 'lucide-react';
 import { fundClickerContract } from '../../services/TransactionService';
 
 const CookieGame = () => {
@@ -16,7 +16,8 @@ const CookieGame = () => {
     cookies,
     contractHasTokens,
     handleClick,
-    handleRedeem
+    handleRedeem,
+    refreshTokenBalance // Add this to use the new refresh function
   } = useGameContext();
   
   const { mainWallet, gasWallet, loading } = useWalletContext();
@@ -28,6 +29,7 @@ const CookieGame = () => {
   const [fundAmount, setFundAmount] = useState('10');
   const [showFundingForm, setShowFundingForm] = useState(false);
   const [buttonMessage, setButtonMessage] = useState('');
+  const [isRefreshing, setIsRefreshing] = useState(false);
   
   // Update redeem amount when clicksPerToken changes or when switching modes
   useEffect(() => {
@@ -88,8 +90,25 @@ const CookieGame = () => {
       
       alert(`Successfully funded contract with ${fundAmount} $COOKIE tokens!`);
       setShowFundingForm(false);
+      
+      // Refresh token balance after funding
+      refreshTokenBalance();
     } catch (error) {
       alert(`Failed to fund contract: ${error.message}`);
+    }
+  };
+  
+  // Handle manual token balance refresh
+  const handleRefreshBalance = async () => {
+    if (!mainWallet.connected || !gasWallet.address) return;
+    
+    setIsRefreshing(true);
+    try {
+      await refreshTokenBalance();
+    } catch (error) {
+      console.error("Error refreshing balance:", error);
+    } finally {
+      setTimeout(() => setIsRefreshing(false), 500);
     }
   };
   
@@ -152,7 +171,17 @@ const CookieGame = () => {
               )}
             </div>
             
-            <div className="text-sm text-gray-500">$COOKIE Balance: {cookieBalance}</div>
+            <div className="text-sm text-gray-500 flex items-center justify-center">
+              $COOKIE Balance: {cookieBalance}
+              <button 
+                onClick={handleRefreshBalance}
+                disabled={isRefreshing}
+                className="ml-2 text-blue-500 hover:text-blue-700"
+                title="Refresh token balance"
+              >
+                <RefreshCw size={14} className={isRefreshing ? "animate-spin" : ""} />
+              </button>
+            </div>
             <div className="text-xs text-gray-400">
               You need {clicksPerToken} points for 1 $COOKIE token
             </div>
