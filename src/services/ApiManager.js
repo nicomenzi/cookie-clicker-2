@@ -25,7 +25,6 @@ class ApiManager {
     // Provider config - now using Monad direct RPC
     this.rpcUrls = {
       primary: "https://testnet-rpc.monad.xyz/",
-      backup: "https://monad-testnet.g.alchemy.com/v2/488IcywoV_kXnNsIorSEew1H3e2AujuY"
     };
     
     this.currentRpcUrl = this.rpcUrls.primary;

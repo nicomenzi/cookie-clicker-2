@@ -227,32 +227,7 @@ export const getTokenBalance = async (provider, address) => {
       return formattedBalance;
     } catch (error) {
       console.error("Error getting token balance:", error.message);
-      
-      // Try with a different provider before giving up
-      try {
-        console.log("Trying backup provider for token balance...");
-        const backupProvider = new ethers.providers.JsonRpcProvider(
-          "https://monad-testnet.g.alchemy.com/v2/488IcywoV_kXnNsIorSEew1H3e2AujuY"
-        );
-        
-        const backupContract = new ethers.Contract(
-          COOKIE_TOKEN_ADDRESS,
-          COOKIE_TOKEN_ABI,
-          backupProvider
-        );
-        
-        // For simplicity, just use 18 as default decimals for backup attempt
-        const backupBalance = await backupContract.balanceOf(address);
-        const backupFormatted = ethers.utils.formatUnits(backupBalance, 18);
-        console.log(`Retrieved backup token balance: ${backupFormatted} $COOKIE`);
-        return backupFormatted;
-      } catch (backupError) {
-        console.error("Both primary and backup balance checks failed:", backupError.message);
-        
-        // Throw the error instead of silently returning "0"
-        // This makes the issue visible instead of hiding it
-        throw new Error(`Failed to get token balance: ${error.message}`);
-      }
+      throw new Error(`Failed to get token balance: ${error.message}`);
     }
   }, `token-balance:${address}`, 10000, { priority: 'high' }); // Cache for only 10 seconds, highest priority
 };
