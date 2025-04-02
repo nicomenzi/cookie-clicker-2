@@ -2,7 +2,7 @@
 
 A decentralized cookie clicker game built on the Monad blockchain where each click is verified on-chain and rewards players with $COOKIE tokens.
 
-![Blockchain Cookie Clicker](https://api.placeholder/400/200)
+![Blockchain Cookie Clicker](https://cookie-clicker-monad.vercel.app/)
 
 ## 🍪 Overview
 
